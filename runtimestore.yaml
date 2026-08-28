@@ -3,11 +3,11 @@ auth:
     username: mae
     password: pai
 devices:
-    tablet:
-        enforcementToggle: enforcementON
+    tv:
+        enforcementToggle: enforcementOFF
         pauseToggle: pauseOFF
         pauseMinutesRemaining: 0
-        deviceStatus: inUse
+        deviceStatus: enforcementOFF
         days:
             fri:
                 taMinutes: 120
