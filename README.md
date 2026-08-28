@@ -91,18 +91,32 @@ refresh needed.
 
 ## Install
 
-Requirements: **Go 1.25+** and a Linux/Unix host. The only dependency is
-`gopkg.in/yaml.v3` (fetched automatically).
+Requirements: a Linux/Unix host (no Go toolchain needed — the binary is static).
 
 ```bash
-# 1. Get the code
+# 1. Download the compiled binary 
+mkdir kidsout && cd kidsout
+wget "https://github.com/zipizap/kidsout/raw/refs/heads/main/kidsout"
+chmod +x kidsout
+
+# 2. Download demo devices/ 
+wget "https://github.com/zipizap/kidsout/raw/refs/heads/main/devices.example.tgz" -O- | tar zxv
+
+# 3. Run
+./kidsout
+
+# 4. Open http://localhost:8080/ in a browser and log in (user "mae" password "pai")
+```
+
+### Building from source instead
+
+Requirements: **Go 1.25+**. The only dependency is `gopkg.in/yaml.v3` (fetched
+automatically).
+
+```bash
 git clone <your-repo-url> kidsout
 cd kidsout
-
-# 2. Build a static binary  (produces ./kidsout)
-./go_build.sh
-
-# 3. Run it
+./go_build.sh         # produces ./kidsout
 ./kidsout
 ```
 

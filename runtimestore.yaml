@@ -1,4 +1,4 @@
-lastTickDate: "2026-08-01"
+lastTickDate: "2026-08-28"
 auth:
     username: mae
     password: pai
@@ -11,7 +11,7 @@ devices:
         days:
             fri:
                 taMinutes: 120
-                tuMinutes: 12
+                tuMinutes: 1
                 tfStart: "09:00"
                 tfEnd: "21:00"
             mon:
@@ -21,7 +21,7 @@ devices:
                 tfEnd: "21:00"
             sat:
                 taMinutes: 120
-                tuMinutes: 1
+                tuMinutes: 0
                 tfStart: "09:00"
                 tfEnd: "21:00"
             sun:
@@ -45,14 +45,14 @@ devices:
                 tfStart: "09:00"
                 tfEnd: "21:00"
     tv:
-        enforcementToggle: enforcementOFF
+        enforcementToggle: enforcementON
         pauseToggle: pauseOFF
         pauseMinutesRemaining: 0
-        deviceStatus: enforcementOFF
+        deviceStatus: inUse
         days:
             fri:
                 taMinutes: 120
-                tuMinutes: 0
+                tuMinutes: 1
                 tfStart: "09:00"
                 tfEnd: "21:00"
             mon:
@@ -93,7 +93,7 @@ devices:
         days:
             fri:
                 taMinutes: 120
-                tuMinutes: 16
+                tuMinutes: 1
                 tfStart: "09:00"
                 tfEnd: "21:00"
             mon:
@@ -102,9 +102,9 @@ devices:
                 tfStart: "09:00"
                 tfEnd: "21:00"
             sat:
-                taMinutes: 80
-                tuMinutes: 71
-                tfStart: "02:05"
+                taMinutes: 120
+                tuMinutes: 0
+                tfStart: "09:00"
                 tfEnd: "21:00"
             sun:
                 taMinutes: 120
