@@ -1,0 +1,160 @@
+/* Kidsout - compact, mobile-first, high-density */
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
+body {
+  font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-size: 12px;
+  background: #fafafa;
+  color: #111;
+}
+
+#tablewrap { overflow: auto; height: 100vh; -webkit-overflow-scrolling: touch; }
+
+table { border-collapse: separate; border-spacing: 0; min-width: 100%; }
+th, td {
+  border-bottom: 1px solid #e2e2e2;
+  border-right: 1px solid #eee;
+  padding: 2px 4px;
+  text-align: center;
+  white-space: nowrap;
+}
+
+/* sticky header row + first column */
+thead th {
+  position: sticky; top: 0; z-index: 3;
+  background: #37474f; color: #fff;
+  font-size: 11px; padding: 4px 6px;
+}
+thead th.corner { left: 0; z-index: 5; }
+tbody th.devcol {
+  position: sticky; left: 0; z-index: 2;
+  background: #eceff1;
+  width: 122px; padding: 3px 4px;
+  font-size: 12px;
+}
+thead th.today { background: #1565c0; }
+td.today { background-color: rgba(21,101,192,.07); }
+
+/* intercalating row colors */
+tbody tr:nth-child(even) td { background-color: #f4f6f8; }
+tbody tr:nth-child(even) td.today { background-color: rgba(21,101,192,.10); }
+
+/* deviceName status colors */
+.devname { display: block; font-weight: 700; font-size: 13px; border-radius: 3px; padding: 1px 3px; }
+.devname.inUse { background: #4caf50; color: #fff; }
+.devname.blocked { background: #424242; color: #fff; }
+.devname.paused { background: #000; color: #fff; }
+.devname.notInUse { background: #f5f5f5; color: #111; }
+.devname.enforcementOFF { background: #1565c0; color: #fff; }
+
+.devstatus {
+  display: block; font-size: 9px; color: #90a4ae; margin-top: 1px;
+  max-width: 106px; overflow: hidden; text-overflow: ellipsis; margin-left: auto; margin-right: auto;
+}
+
+/* deviceStatus change: glowing bloom that settles back to the discrete look */
+.devstatus.flash {
+  animation: statusflash 1.8s cubic-bezier(.22, 1, .36, 1) both;
+  border-radius: 3px;
+}
+@keyframes statusflash {
+  0% {
+    color: #eafaff;
+    text-shadow: 0 0 1px #fff, 0 0 8px #4fc3f7, 0 0 16px #29b6f6;
+    background: rgba(79, 195, 247, .38);
+    box-shadow: 0 0 10px 2px rgba(79, 195, 247, .55);
+  }
+  35% {
+    color: #0288d1;
+    text-shadow: 0 0 6px rgba(79, 195, 247, .75);
+    background: rgba(79, 195, 247, .18);
+    box-shadow: 0 0 6px 1px rgba(79, 195, 247, .30);
+  }
+  100% {
+    color: #90a4ae;
+    text-shadow: 0 0 0 rgba(79, 195, 247, 0);
+    background: transparent;
+    box-shadow: none;
+  }
+}
+
+/* device toggles */
+.togglerow { display: flex; align-items: center; justify-content: space-between; gap: 4px; margin-top: 2px; }
+.togglebtns { display: flex; gap: 4px; }
+.toggle {
+  border: none; background: transparent; font-size: 15px;
+  cursor: pointer; border-radius: 4px; padding: 1px 3px; line-height: 1.2;
+}
+.toggle.glow { animation: glow 1.2s ease-in-out infinite alternate; background: #b3e5fc; }
+.toggle.ghost { opacity: .3; pointer-events: none; filter: grayscale(1); }
+@keyframes glow {
+  from { box-shadow: 0 0 2px 1px #4fc3f7; }
+  to   { box-shadow: 0 0 8px 4px #4fc3f7; }
+}
+.pauseleft {
+  font-size: 9px; color: #0277bd; display: block;
+  max-width: 106px; overflow: hidden; text-overflow: ellipsis; margin-left: auto; margin-right: auto;
+}
+
+/* deviceStatus history sparkline: transparent bg, crisp dots, faint level gridlines */
+.minichart { width: 60px; height: 18px; flex: 0 0 auto; overflow: visible; }
+.minichart-grid { stroke: rgba(55, 71, 79, .2); stroke-width: .5; }
+.minichart-line {
+  fill: none; stroke: url(#minichart-grad); stroke-width: .8;
+  stroke-linecap: round; stroke-linejoin: round; opacity: .5;
+  filter: drop-shadow(0 0 1.5px #4fc3f7);
+}
+.minichart-dot { opacity: .55; }
+
+/* row reorder buttons */
+.orderrow { display: flex; justify-content: center; gap: 10px; margin-top: 1px; }
+.orderbtn {
+  border: none; background: transparent; color: #b0bec5;
+  font-size: 9px; cursor: pointer; padding: 0 2px; line-height: 1;
+}
+.orderbtn:hover { color: #546e7a; }
+
+/* device-weekday cells */
+td.cell { min-width: 92px; vertical-align: middle; }
+.line1 { font-weight: 700; font-size: 13px; display: flex; align-items: center; justify-content: center; gap: 4px; }
+.line2 { color: #9e9e9e; font-size: 11px; }
+.line3 { font-size: 9.5px; color: #555; }
+button.pm {
+  border: none; background: transparent; font-size: 13px; cursor: pointer;
+  padding: 0 2px; line-height: 1;
+}
+button.cal { border: none; background: transparent; font-size: 11px; cursor: pointer; padding: 0; }
+
+/* info-cell-mode */
+td.cell.info { background: #cfd6db !important; color: #5a6a72; }
+td.cell.info .infotext {
+  font-family: "Courier New", monospace;
+  font-weight: 700; font-size: 10.5px; letter-spacing: .5px;
+  overflow: hidden; max-width: 110px; margin: 0 auto;
+}
+td.cell.info .infotext > span { display: inline-block; }
+td.cell.info .infotext.scroll > span {
+  animation: marquee 6s linear infinite; padding-left: 100%;
+}
+@keyframes marquee { to { transform: translateX(-100%); } }
+
+/* modals */
+dialog { border: 1px solid #bbb; border-radius: 8px; padding: 12px; max-width: 92vw; }
+dialog::backdrop { background: rgba(0,0,0,.4); }
+dialog h3 { font-size: 13px; margin-bottom: 8px; }
+.tfrow { display: flex; gap: 10px; }
+.tfrow label { display: flex; flex-direction: column; font-size: 11px; gap: 2px; }
+.hmpick { display: flex; align-items: center; gap: 2px; font-weight: 700; }
+.hmpick select { font-size: 14px; padding: 3px 2px; border: 1px solid #bbb; border-radius: 4px; background: #fff; }
+.btnrow { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+.btnrow button { padding: 4px 12px; font-size: 12px; cursor: pointer; border: 1px solid #999; background: #fff; border-radius: 4px; }
+.btnrow button.primary { background: #1565c0; color: #fff; border-color: #1565c0; }
+.btnrow button:disabled { opacity: .4; cursor: not-allowed; }
+.error { color: #c62828; font-size: 10px; margin-top: 6px; }
+.legend { font-size: 11px; background: #f5f5f5; padding: 6px; border-radius: 4px; }
+.legendlist { font-size: 11px; margin: 8px 0 0 16px; display: flex; flex-direction: column; gap: 3px; }
+
+#helpbtn { background: transparent; border: none; color: #fff; font-size: 13px; cursor: pointer; }
+
+/* help panel: pinned bottom-right, non-modal (no backdrop) so the table stays peekable */
+#helpmodal { position: fixed; inset: auto 12px 12px auto; margin: 0; box-shadow: 0 4px 16px rgba(0,0,0,.35); }

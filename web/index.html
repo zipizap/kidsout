@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kidsout</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <linearGradient id="minichart-grad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#00e5ff"/>
+      <stop offset="50%" stop-color="#7c4dff"/>
+      <stop offset="100%" stop-color="#00e676"/>
+    </linearGradient>
+    <linearGradient id="minichart-fade-grad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#fff" stop-opacity="0"/>
+      <stop offset="100%" stop-color="#fff" stop-opacity="1"/>
+    </linearGradient>
+    <mask id="minichart-fade">
+      <rect x="0" y="0" width="80" height="18" fill="url(#minichart-fade-grad)"/>
+    </mask>
+  </defs>
+</svg>
+<div id="tablewrap">
+  <table id="weektable">
+    <thead><tr id="headrow"><th class="corner"><button id="helpbtn" title="Help">&#10068;</button></th></tr></thead>
+    <tbody id="tbody"></tbody>
+  </table>
+</div>
+
+<!-- timeframe picker modal -->
+<dialog id="tfmodal">
+  <h3 id="tfmodal-title">Timeframe</h3>
+  <div class="tfrow">
+    <label>Start
+      <span class="hmpick">
+        <select id="tfstart-h"></select>:<select id="tfstart-m"></select>
+      </span>
+    </label>
+    <label>End
+      <span class="hmpick">
+        <select id="tfend-h"></select>:<select id="tfend-m"></select>
+      </span>
+    </label>
+  </div>
+  <p id="tferror" class="error" hidden>Start must be before End (no midnight crossing)</p>
+  <div class="btnrow">
+    <button id="tfcancel">CANCEL</button>
+    <button id="tfconfirm" class="primary">CONFIRM</button>
+  </div>
+</dialog>
+
+<!-- legend / help modal -->
+<dialog id="helpmodal">
+  <h3>How to read a cell</h3>
+  <pre class="legend">
+ | &#10133; Remaining &#10134; |  &larr; time remaining today
+        (Used)         &larr; time already used
+      TimeFrame &#128467;     &larr; allowed hours
+  </pre>
+  <ul class="legendlist">
+    <li>&#10133; / &#10134; &mdash; add/remove 10min allowed (applies to that weekday, every week)</li>
+    <li>&#128467; &mdash; change the allowed time-window</li>
+    <li>&#9199;&#65039; &mdash; pause-block device for 20min</li>
+    <li>&#128274;/&#128275; &mdash; toggle enforcement (&#128274; shown = enforcing; tap to set free-mode)</li>
+  </ul>
+  <div class="btnrow"><button id="helpclose" class="primary">OK</button></div>
+</dialog>
+
+<script src="app.js"></script>
+</body>
+</html>

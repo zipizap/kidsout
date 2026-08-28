@@ -1,0 +1,128 @@
+lastTickDate: "2026-08-01"
+auth:
+    username: mae
+    password: pai
+devices:
+    tablet:
+        enforcementToggle: enforcementON
+        pauseToggle: pauseOFF
+        pauseMinutesRemaining: 0
+        deviceStatus: inUse
+        days:
+            fri:
+                taMinutes: 120
+                tuMinutes: 12
+                tfStart: "09:00"
+                tfEnd: "21:00"
+            mon:
+                taMinutes: 120
+                tuMinutes: 0
+                tfStart: "09:00"
+                tfEnd: "21:00"
+            sat:
+                taMinutes: 120
+                tuMinutes: 1
+                tfStart: "09:00"
+                tfEnd: "21:00"
+            sun:
+                taMinutes: 120
+                tuMinutes: 0
+                tfStart: "09:00"
+                tfEnd: "21:00"
+            thu:
+                taMinutes: 120
+                tuMinutes: 0
+                tfStart: "09:00"
+                tfEnd: "21:00"
+            tue:
+                taMinutes: 120
+                tuMinutes: 0
+                tfStart: "09:00"
+                tfEnd: "21:00"
+            wed:
+                taMinutes: 120
+                tuMinutes: 0
+                tfStart: "09:00"
+                tfEnd: "21:00"
+    tv:
+        enforcementToggle: enforcementOFF
+        pauseToggle: pauseOFF
+        pauseMinutesRemaining: 0
+        deviceStatus: enforcementOFF
+        days:
+            fri:
+                taMinutes: 120
+                tuMinutes: 0
+                tfStart: "09:00"
+                tfEnd: "21:00"
+            mon:
+                taMinutes: 120
+                tuMinutes: 0
+                tfStart: "09:00"
+                tfEnd: "21:00"
+            sat:
+                taMinutes: 120
+                tuMinutes: 0
+                tfStart: "09:00"
+                tfEnd: "21:00"
+            sun:
+                taMinutes: 120
+                tuMinutes: 0
+                tfStart: "09:00"
+                tfEnd: "21:00"
+            thu:
+                taMinutes: 120
+                tuMinutes: 0
+                tfStart: "09:00"
+                tfEnd: "21:00"
+            tue:
+                taMinutes: 120
+                tuMinutes: 0
+                tfStart: "09:00"
+                tfEnd: "21:00"
+            wed:
+                taMinutes: 120
+                tuMinutes: 0
+                tfStart: "09:00"
+                tfEnd: "21:00"
+    xbox:
+        enforcementToggle: enforcementON
+        pauseToggle: pauseOFF
+        pauseMinutesRemaining: 0
+        deviceStatus: inUse
+        days:
+            fri:
+                taMinutes: 120
+                tuMinutes: 16
+                tfStart: "09:00"
+                tfEnd: "21:00"
+            mon:
+                taMinutes: 120
+                tuMinutes: 0
+                tfStart: "09:00"
+                tfEnd: "21:00"
+            sat:
+                taMinutes: 80
+                tuMinutes: 71
+                tfStart: "02:05"
+                tfEnd: "21:00"
+            sun:
+                taMinutes: 120
+                tuMinutes: 0
+                tfStart: "09:00"
+                tfEnd: "21:00"
+            thu:
+                taMinutes: 120
+                tuMinutes: 0
+                tfStart: "09:00"
+                tfEnd: "21:00"
+            tue:
+                taMinutes: 120
+                tuMinutes: 0
+                tfStart: "09:00"
+                tfEnd: "21:00"
+            wed:
+                taMinutes: 120
+                tuMinutes: 0
+                tfStart: "09:00"
+                tfEnd: "21:00"
