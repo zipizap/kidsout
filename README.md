@@ -10,8 +10,6 @@ row per device, one column per weekday. From there they can add/remove allowed m
 change the allowed hours, pause a device for 20 minutes, or unlock for
 free-use-mode. 
 
-For scripting/automations, see the [HTTP API reference](README_API.md).
-
 ![Week view](docs/screenshots/weekview.png)
 
 ---
@@ -46,6 +44,48 @@ Every minute the status is derived in this order (first match wins):
 enforcement-off → outside time-frame → no time left → paused → up/down.
 When the status becomes `blockedNotInTimeframe`, an active pause is switched
 back to `pauseOFF` so the device stays blocked only due to the timeframe.
+
+---
+
+## Parent - How to use
+
+Open the site and log in with the configured username/password. You'll see the week grid.
+
+**Reading a cell** — tap the `❔` in the top-left corner for an on-screen legend:
+
+![Cell legend](docs/screenshots/help-panel.png)
+
+Each interactive cell has three lines:
+
+- **Line 1** — remaining time today, with `➕` / `➖` to add or remove 10 minutes of the
+  allowed time. Changes are *per-weekday recurring* (adding to Friday adds to every
+  Friday). Rapid taps are batched before saving.
+- **Line 2** — `(used)` time so far today.
+- **Line 3** — the allowed time-window, with `🗓` to change it.
+
+**Changing the allowed hours** — tap `🗓` on a cell to pick start/end. Crossing midnight
+is not allowed, so `CONFIRM` stays disabled until `start < end`:
+
+![Time-frame picker](docs/screenshots/timeframe-picker.png)
+
+**Per-device controls** (in the device name column):
+
+- `🔒` / `🔓` — toggle **enforcement**. `🔒` shown = currently enforcing; tap it to switch
+  to free-use-mode (`🔓`), where the device is never blocked and its time is **not**
+  counted against the daily budget.
+- `⏯️` — **pause** the device for 20 minutes (great for forcing a temporary break). Ghosted when the device
+  is already blocked by its time/window.
+- `▲` / `▼` — reorder device rows (remembered per browser).
+
+**Live states** — the device name is color-coded and the cells reflect the current
+status. Below: `tablet` is in free-use-mode (blue, `FREE`), `tv` is paused
+(black, `BLOCK-PAUSED`), `xbox` is in use (green). A device that's allowed but
+currently down (`notInUse`) shows a very-light-grey background:
+
+![Device states](docs/screenshots/states.png)
+
+The whole page updates automatically as the backend re-evaluates every minute — no
+refresh needed.
 
 ---
 
@@ -87,19 +127,18 @@ At setup, review each device in the web UI and tap `🔓` to switch it to `🔒`
 
 ### Stopping
 
-Press `Ctrl-C` in the terminal (or send `SIGTERM`, e.g. `systemctl stop kidsout`) to
+Press `Ctrl-C` in the terminal to
 shut down gracefully: the evaluation loop stops and the web server drains in-flight
 requests before exiting. Runtime state is already saved continuously to
 `runtimestore.yaml`, so nothing is lost. A second `Ctrl-C` forces an immediate quit.
 
 ### Minimum files for production
 
-The web UI (`web/`) is embedded into the binary at build time, so a production host
-only needs:
+A production host only needs:
 
 ```
 /opt/kidsout/
-  kidsout                  # the static binary (everything else is optional)
+  kidsout                  # the static binary 
   devices/                 # your device scripts (see "Adding devices")
     <name>/
       getState.sh
@@ -108,8 +147,8 @@ only needs:
 ```
 
 `runtimestore.yaml` is created automatically on first run — just make sure its
-location (`KIDSOUT_RUNTIMESTORE`, default: working directory) is writable. Nothing
-else from the repository (sources, `web/`, docs, helper scripts) is needed at runtime.
+location (`KIDSOUT_RUNTIMESTORE`, default: working directory) is writable. 
+
 
 ### Running as a service (example)
 
@@ -199,8 +238,7 @@ devices:
 ## Adding devices
 
 A "device" is simply a sub-folder under the devices directory containing **three
-executable scripts**. Kidsout discovers devices at startup by scanning for folders that
-contain all three:
+executable scripts**. Kidsout discovers devices at startup by scanning for folders:
 
 ```
 devices/
@@ -271,47 +309,18 @@ exit 0
 
 ---
 
-## Using it (for the parent)
 
-Open the site and log in with the configured username/password. You'll see the week grid.
+## Remote automation
 
-**Reading a cell** — tap the `❔` in the top-left corner for an on-screen legend:
+Additionally, for remote configuration:
+- see **[kidsoutctl](kidsoutctl/README.md)**, a kubectl-style
+command-line client for Kidsout: view device status as colored tables (or JSON/YAML),
+watch live updates, pause/enforce devices, and adjust time limits from the shell.
 
-![Cell legend](docs/screenshots/help-panel.png)
+- see the [HTTP API reference](README_API.md)
 
-Each interactive cell has three lines:
 
-- **Line 1** — remaining time today, with `➕` / `➖` to add or remove 10 minutes of the
-  allowed time. Changes are *per-weekday recurring* (adding to Friday adds to every
-  Friday). Rapid taps are batched before saving.
-- **Line 2** — `(used)` time so far today.
-- **Line 3** — the allowed time-window, with `🗓` to change it.
 
-**Changing the allowed hours** — tap `🗓` on a cell to pick start/end. Crossing midnight
-is not allowed, so `CONFIRM` stays disabled until `start < end`:
-
-![Time-frame picker](docs/screenshots/timeframe-picker.png)
-
-**Per-device controls** (in the device name column):
-
-- `🔒` / `🔓` — toggle **enforcement**. `🔒` shown = currently enforcing; tap it to switch
-  to free-use-mode (`🔓`), where the device is never blocked and its time is **not**
-  counted against the daily budget.
-- `⏯️` — **pause** the device for 20 minutes (great for meals). Ghosted when the device
-  is already blocked by its time/window.
-- `▲` / `▼` — reorder device rows (remembered per browser).
-
-**Live states** — the device name is color-coded and the cells reflect the current
-status. Below: `tablet` is in free-use-mode (blue, `FREE`), `tv` is paused
-(black, `BLOCK-PAUSED`), `xbox` is in use (green). A device that's allowed but
-currently down (`notInUse`) shows a very-light-grey background:
-
-![Device states](docs/screenshots/states.png)
-
-The whole page updates automatically as the backend re-evaluates every minute — no
-refresh needed.
-
----
 
 ## Troubleshooting
 
