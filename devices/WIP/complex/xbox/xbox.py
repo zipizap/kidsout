@@ -1332,7 +1332,7 @@ def main():
 
     if args.command not in ("probe", "state") and not cfg:
         sys.exit(f"no {os.path.basename(CONFIG_FILE)} — copy config.example.json to "
-                 f"config.json and fill in the rpcd credentials (see README).")
+                 f"config.json and fill in the rpcd credentials (see DESIGN.md §7).")
 
     try:
         rc = COMMANDS[args.command](fw, device, args)

@@ -10,7 +10,7 @@ Emulates the subset the driver uses:
     system board
 
 and — unlike the v1 mock, which only modelled the happy path and so let every
-failure-mode claim in the README go unverified — it can be told to fail:
+failure-mode claim in the docs go unverified — it can be told to fail:
 
     mock.state.fail = "http404"       serve 404 on the ubus path
     mock.state.fail = "badjson"       serve junk instead of JSON-RPC
