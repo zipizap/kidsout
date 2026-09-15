@@ -1,16 +1,23 @@
 # REVIEW.1 remediation — progress
 
 Tracking file for the v2 rewrite driven by [REVIEW.1.md](REVIEW.1.md).
+
+> **Status as of 2026-09-15: v2 is code-complete and hardware-verified enough to
+> know it is not deployable yet.** The offline suite is green and the transport
+> works against the real router, but hardware verification found four blockers —
+> three of which fail silently. They are specified in **[REVIEW.2.md](REVIEW.2.md)**,
+> which is the input spec for v3. This file records how we got there.
+
 Decisions taken with Paulo before implementation:
 
 | Question | Decision |
 |---|---|
 | Auth | Scoped rpcd user `kidsout`, created by `router_bootstrap.sh`. No root credential in `config.json`. |
-| State metric | nft byte counters (F-06), thresholded on the **outbound** MAC-matched counter. |
-| Rule shape | One MAC-based outbound REJECT; `_fwd_in` and `_input_out` deleted (F-04, F-08). |
+| State metric | ~~nft byte counters (F-06), thresholded on the outbound MAC-matched counter.~~ **Superseded 2026-09-15** — hardware offload bypasses the forward hook. Now conntrack byte accounting, accumulated router-side. See REVIEW.2 G-01/G-04. |
+| Rule shape | One MAC-based outbound REJECT; `_fwd_in` and `_input_out` deleted (F-04, F-08). **Must name both console MACs** — see REVIEW.2 G-02. |
 | Scope | Everything: §8.1 + §8.2 + §8.3 + §8.4 + the §8.5 test suite. |
 | Bootstrap | Script run over SSH by Paulo; password never seen by the assistant. |
-| Calibration | Full session against the real console (standby vs active) — see [F-06.md](F-06.md). |
+| Calibration | **Done 2026-09-15**: idle 20.8 / downloading 93.7 / gaming 289.5 KB/min outbound. 200 KB/min threshold confirmed — see [F-06.md](F-06.md). |
 | Legacy core | `old/` deleted (review Q4 answered: retired). |
 | Delivery | `xbox.py` rewritten in place, no backup. |
 
@@ -31,7 +38,8 @@ driver, far smaller blast radius.
 
 ## Status
 
-Legend: ☐ not started · ◐ code written, unverified on hardware · ☑ verified
+Legend: ☐ not started · ◐ code written, unverified on hardware · ☑ verified ·
+⚠ verified-broken, needs rework (see [REVIEW.2.md](REVIEW.2.md))
 
 | ID | Finding | Status | Notes |
 |---|---|---|---|
@@ -56,6 +64,18 @@ Legend: ☐ not started · ◐ code written, unverified on hardware · ☑ verif
 | §8.4 | README corrections | ☑ | README rewritten; every v1 claim in REVIEW.1 §8.4 re-derived from v2's behaviour |
 | §8.5 | offline test suite | ☑ | 4 suites, 46 cases, 119 assertions, all passing |
 
+### New blockers found by hardware verification (REVIEW.2)
+
+These are not REVIEW.1 findings; they are defects in v2 itself, each found by
+measurement rather than by reading code. All four fail open or invisible.
+
+| ID | Finding | Why it matters |
+|---|---|---|
+| G-01 | Hardware offload blinds the nft forward-hook counters | The state metric cannot work as designed. `getState.sh` would report `down` throughout real gameplay |
+| G-02 | `device.json` names only the ethernet MAC; the console is on WiFi | The block matches nothing and the metric reads zero — both silently |
+| G-03 | `block.sh` exits 0 when the conntrack flush fails | Reports success to kidsout while the console keeps playing |
+| G-04 | A conntrack byte sum is non-monotonic; `sample_rate` assumes monotonic | Measured **−510 KB/min during active gameplay**; would sit in permanent `unknown` |
+
 ## Offline suite
 
 ```
@@ -74,27 +94,54 @@ Two real defects in v2 were found by writing these tests, not by review:
    during `probe()` was discarded by the counter sample written at the end of
    `cmd_state`. It now merges.
 
-## Remaining — needs the router and the console
+## Remaining
 
+### Settled by the 2026-09-15 session
+
+- [x] Flow-offload question — **hardware offload confirmed**; nft forward-hook
+      counters cannot work; conntrack accounting verified as the replacement.
+- [x] IPv6 — no delegation on this ISP (check A).
+- [x] Calibration — threshold 200 KB/min confirmed against the live console.
+- [x] Transport, endpoint discovery, `unknown` path and the driver log — all
+      proven against the real router.
+
+### Blocked on v3 code changes (REVIEW.2 §8.1)
+
+Do these before touching the router again — four of them are the blockers, and
+running `install`/`block` before they are fixed would only prove they are broken.
+
+- [ ] G-01 + G-04 — helper's `counters` verb reads conntrack and returns a
+      **monotonic accumulator**; drop the nft table entirely.
+- [ ] G-02 — `device.json` carries both interfaces; one rule names both MACs;
+      addresses resolved at run time from lease + neighbour tables.
+- [ ] G-03 — `cmd_block` returns non-zero when the flush fails; `selftest` fails
+      when offload is on and conntrack-tools is absent.
+- [ ] G-07 — one source of truth for `state_timeout` / `state_deadline`.
+- [ ] G-08 — mock emits the new counters shape; add a non-monotonic fixture and a
+      `cmd_block`-flush-failure regression test.
+
+### Then, on hardware, in this order (REVIEW.2 §8.5)
+
+- [ ] `opkg update && opkg install conntrack-tools` (package lists are empty).
 - [ ] Run `router_bootstrap.sh`; record the printed facts here.
-- [ ] `./xbox.py selftest` green (proves the ACL scope is sufficient).
-- [ ] `./xbox.py pin`.
-- [ ] `./xbox.py discover --write` — must be taught to record **both** MACs
-      (ethernet `...93`/.172 and WiFi `...90`/.169), not just whichever is live.
+- [ ] `./xbox.py selftest` green — the first real test of the ACL scope.
+- [ ] `./xbox.py pin` (fingerprint already known: `65:F6:D0:…:94:7F`).
+- [ ] `./xbox.py discover --write` on **each** interface; confirm both recorded.
 - [ ] `./xbox.py install` → **console still online** (proves the F-01 fix).
-- [ ] Confirm the live ruleset, not just the committed config:
-      `nft list ruleset | grep -A3 kidsout_xbox` after a block — this settles
-      REVIEW.1's open question about whether the explicit `uci apply` after
-      `uci commit` is redundant.
-- [ ] `block` → an *in-progress* game or stream dies within seconds (F-05).
-- [x] ~~Confirm `ether saddr` matches in the forward hook~~ — **answered, negatively**:
-      hardware offload bypasses the forward hook entirely, so no counter there can
-      work. Metric moved to conntrack byte accounting (verified working).
-- [x] ~~Check for a global IPv6 address on the console~~ — no IPv6 delegation (check A).
+- [ ] `nft list ruleset | grep -A3 kidsout_xbox` — confirm the rule is *in force*,
+      not merely committed; settles whether the explicit `uci apply` is redundant.
+- [ ] `block` **while a game is in progress** → the session dies within seconds.
+      This is the test G-03 and F-05 both hinge on, and it has never been run.
+- [ ] `block` while the console is on the *other* interface → still blocks (G-02).
 - [ ] `unblock` → recovery.
-- [x] ~~Calibration session~~ — done 2026-09-15: idle 20.8 / downloading 93.7 /
-      gaming 289.5 KB/min outbound. 200 KB/min threshold confirmed. See F-06.md.
 - [ ] Pull the router's power mid-tick → `unknown` inside the deadline.
+- [ ] Re-calibrate on ethernet; confirm the threshold still separates.
+
+### Deployment
+
+- [ ] Move to `devices/xbox/` — `DiscoverDevices` scans only immediate children of
+      `devicesDir`, so the driver is invisible where it currently lives (G-05).
+- [ ] Restart kidsout; discovery runs once, at startup.
 
 ## Hardware facts — read-only check A, 2026-09-11
 
@@ -107,15 +154,15 @@ change. Full output kept in `router_checks_A.sh.printout`.
 | firewall | fw4 + nftables 1.1.1, `nftables-json` installed | `nft -j` works, text fallback unused |
 | zones | `lan`, `wan`, **`WgZone`** | a third zone lan can forward into — block scope widened to all forwarding |
 | `src_mac` | `fw4.uc:2314` `src_mac: [ "mac", null, PARSE_LIST ]`, mapped to `smacs_pos` | **F-04's MAC-keyed rule is supported** |
-| nft dry run | named counters + `ether saddr` + `priority -150` all parse | F-06's counter syntax is valid |
-| priority clash | a chain already sits at `forward priority mangle` (-150) | ours moved to **-160** |
+| nft dry run | named counters + `ether saddr` + `priority -150` all parse | the syntax was valid — but check B showed the *hook* is bypassed by hardware offload, so this told us nothing useful (REVIEW.2 G-01) |
+| priority clash | a chain already sits at `forward priority mangle` (-150) | ours moved to -160 — moot: the chain is not used at all in the v3 design |
 | rpcd | 2025.09.01 with `rpcd-mod-file`; only one login (`root`, `*`/`*`) | ACL schema confirmed against `luci-app-firewall.json` |
 | hashing tools | `cryptpw`, `mkpasswd`, `openssl` **all absent**; only `/bin/passwd` | bootstrap creates a system user and defers to `passwd`, storing `$p$kidsout` |
 | conntrack-tools | **not installed** | F-05's flush was a no-op; bootstrap now installs it |
 | established timeout | `nf_conntrack_tcp_timeout_established = 7440` (2 h, not 5 days) | a block without a flush is a 2-hour no-op, not a 5-day one |
 | established accept | `ct state vmap { established : accept }` sits **above** `jump forward_lan` | **F-05 confirmed on hardware**, not merely inferred |
 | IPv6 | no default v6 route; LAN has only ULA `fd0c:cfee:9422::1/60` | **REVIEW.1 Q1 answered: the ISP does not provide IPv6.** F-04 was a latent trap, not a live bug |
-| console | MAC `d8:e2:df:92:a9:93`, hostname `XBOX`, static reservation at `dhcp.@host[1]` | `device.json.mac` filled without needing `discover` |
+| console | MAC `d8:e2:df:92:a9:93`, hostname `XBOX`, static reservation at `dhcp.@host[1]` | `device.json.mac` filled without needing `discover` — **but this is only the ETHERNET interface; see check B** |
 | uhttpd | 80 + 443, EC cert `/etc/uhttpd.crt`, `ubus_prefix=/ubus` | transport assumptions confirmed |
 | storage | UBIFS overlay, 41.5 MB free of 44.7 MB | room for conntrack-tools; F-09's flash-wear concern is real but wear-levelled |
 
@@ -141,10 +188,10 @@ whether `nf_conntrack_acct` offers an alternative byte source, and whether a
 
 ## Check B — 2026-09-15: the offload question is SETTLED
 
-Full output in `router_checks_B1.sh.printout`. The console was **off the network**
-during this run (no DHCP lease, neighbour `FAILED`, zero conntrack flows), so the
-console-specific parts of B2 are still pending; but the design question was
-answerable without it.
+Full output in `router_checks_B1.sh.printout`. The console was off the network
+during the B1 run, but the design question was answerable without it. The
+console-specific measurements were taken afterwards, once the console was woken —
+and finding it is what uncovered the two-MAC defect below.
 
 | fact | value | consequence |
 |---|---|---|
@@ -194,6 +241,30 @@ Trade-off accepted: conntrack is keyed on the console's **IP**, not its MAC, whi
 gives up F-04's IPv6 coverage. Safe here — check A established the ISP delegates no
 IPv6 and the console has a static reservation — but it must be revisited if that
 changes. The MAC-keyed *enforcement* rule is unaffected and stays as it is.
+
+### Console measurements, 2026-09-15 (console awake, on WiFi)
+
+Taken after the console was woken. Outbound is the deciding metric; every figure
+cross-validated against `iwinfo assoclist`, which is mac80211's own per-station
+counter and wholly independent of netfilter and of the offload path.
+
+| state | conntrack out | iwinfo out | inbound | verdict @ 200 KB/min |
+|---|---|---|---|---|
+| idle / dashboard | 20.8 KB/min | — | 23 KB/min | DOWN ✓ |
+| downloading | 93.7 KB/min | 131.0 KB/min | 11.8 MB/min | DOWN ✓ |
+| **gaming** (82 UDP flows, dport 22222) | **289.5 KB/min** | 340.5 KB/min | — | **UP** ✓ |
+
+Conntrack captured **95.5 %** of iwinfo's inbound bytes and 71–85 % of outbound; the
+outbound gap is 802.11 framing on an ACK-dominated stream, not error. The two move
+together, which is what the cross-check was for.
+
+**The 200 KB/min threshold holds**, with 3.1× separation between gaming and
+downloading. It was a good guess and is now a measurement.
+
+**And it retires F-06's own stated worry.** That document warned a background download
+would read as `up` and burn the allowance. It does not: the outbound ACK stream during
+a 12 MB/min download is ~0.8 % of downstream, well under the threshold. The metric
+being outbound-only is what saves it.
 
 ### Second finding: the console has TWO MACs, and device.json only knows one
 
