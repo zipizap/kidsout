@@ -277,15 +277,20 @@ counters-remove)
 flush)
 	have conntrack || { echo "conntrack-tools not installed" >&2; exit 3; }
 	[ $# -gt 0 ] || { echo "flush needs at least one address" >&2; exit 2; }
+	# Count ENTRIES actually destroyed, not commands that succeeded. conntrack
+	# reports "N flow entries have been deleted." on stderr; summing that is
+	# the difference between "cut a live session" and "there was nothing to
+	# cut", which is exactly what the operator needs to know.
 	n=0
 	for a in "$@"; do
 		valid_addr "$a" || { echo "bad address: $a" >&2; exit 2; }
-		conntrack -D -s "$a" >/dev/null 2>&1 && n=$((n + 1))
-		conntrack -D -d "$a" >/dev/null 2>&1 && n=$((n + 1))
+		for d in -s -d; do
+			c=$(conntrack -D "$d" "$a" 2>&1 >/dev/null \
+			    | sed -n 's/.*: \([0-9][0-9]*\) flow entries have been deleted.*/\1/p')
+			[ -n "$c" ] && n=$((n + c))
+		done
 	done
-	# Report how many directions actually matched, so the driver can tell
-	# "flushed a live session" from "there was nothing to flush".
-	echo "flushed $n entr$([ "$n" = 1 ] && echo y || echo ies) for $*"
+	echo "flushed $n conntrack entr$([ "$n" = 1 ] && echo y || echo ies)"
 	;;
 
 neigh)

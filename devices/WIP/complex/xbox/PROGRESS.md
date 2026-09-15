@@ -2,7 +2,12 @@
 
 Tracking file for the v2 rewrite driven by [REVIEW.1.md](REVIEW.1.md).
 
-> **Status as of 2026-09-15: v3 code is written; the router is still untouched.**
+> **Status as of 2026-09-15: VERIFIED END TO END ON HARDWARE.** The driver
+> installs, blocks a live multiplayer game, and unblocks, against the real
+> router and the real console. See "Hardware verification" below. Remaining
+> work is deployment (`devices/xbox/`) and a restart of kidsout.
+>
+> _(earlier status: v3 code is written; the router is still untouched.)_
 > Hardware verification found four blockers, three of which failed silently
 > (**[REVIEW.2.md](REVIEW.2.md)**). All four are now fixed in code, with
 > regression tests that were mutation-checked to confirm they actually bite.
@@ -44,24 +49,24 @@ Legend: ☐ not started · ◐ code written, unverified on hardware · ☑ verif
 
 | ID | Finding | Status | Notes |
 |---|---|---|---|
-| F-01 | block/allow polarity inverted | ◐ | one MAC rule; `enabled=1` blocks; install lands ALLOWED; prints meanings, not uci values |
-| F-02 | `unknown` unreachable; all errors → `down` | ◐ | no bare `except: continue`; nine failure paths asserted in test_failure_modes.py |
-| F-03 | getState 61 s vs 10 s budget | ◐ | state_timeout 1.5 s, hard deadline 4 s, memoised login failure, one path, no fallback chain |
-| F-04 | IPv6 not blocked | ⚠ | rule keyed on `src_mac`, but device.json names only the **ethernet** MAC while the console is on **WiFi** — the block would not match. Needs both MACs. No IPv6 on this ISP, so the original concern is moot |
-| F-05 | block does not cut live sessions | ⚠ | **more severe than reviewed**: with hardware offload an in-progress session bypasses the REJECT entirely, so the flush is the whole mechanism. conntrack-tools still absent → flush is a silent no-op and `cmd_block` still returns success |
-| F-06 | Instant-On standby reads `up` forever | ◐ | **nft counters abandoned** (hardware offload bypasses the forward hook); metric moves to conntrack byte accounting. Threshold 200 KB/min now **calibrated against the real console** — see F-06.md |
+| F-01 | block/allow polarity inverted | ☑ | one MAC rule; `enabled=1` blocks; install lands ALLOWED; prints meanings, not uci values |
+| F-02 | `unknown` unreachable; all errors → `down` | ☑ | no bare `except: continue`; nine failure paths asserted in test_failure_modes.py |
+| F-03 | getState 61 s vs 10 s budget | ☑ | state_timeout 1.5 s, hard deadline 4 s, memoised login failure, one path, no fallback chain |
+| F-04 | IPv6 not blocked | ☑ | rule names BOTH MACs; live ruleset confirmed `ether saddr { ...:90, ...:93 }`. No IPv6 WAN on this ISP, so the original concern is moot |
+| F-05 | block does not cut live sessions | ☑ | **proven on hardware: a live multiplayer game disconnected.** conntrack installed; flush reports real entry counts (32 on a live session, 0 on repeat); `cmd_block` returns non-zero if the flush fails |
+| F-06 | Instant-On standby reads `up` forever | ☑ | verified live: `up` at 471.6 KB/min gaming, `down` at 3.0 KB/min blocked. **nft counters abandoned** (hardware offload bypasses the forward hook); metric moves to conntrack byte accounting. Threshold 200 KB/min now **calibrated against the real console** — see F-06.md |
 | F-07 | source-port regex never matches | ☑ | dissolved: conntrack parsing retired entirely; metric now stated in test_state.py's docstring |
-| F-08 | third rule was a forward rule | ◐ | deleted, along with `_fwd_in`; install migrates the old sections away |
+| F-08 | third rule was a forward rule | ☑ | deleted, along with `_fwd_in`; install migrates the old sections away |
 | F-09 | commit + reload every 60 s | ☑ | `_set_enabled` reads first and writes only when stale; asserted offline |
-| F-10 | no reconciliation | ◐ | escape hatch documented; 15-min `audit:` log line; upstream change proposed in the README |
-| F-11 | `alt_hosts` unused | ◐ | hosts iterated in `candidate_urls`, bounded by the state deadline |
+| F-10 | no reconciliation | ☑ | escape hatch documented; 15-min `audit:` log line; upstream change proposed in the README |
+| F-11 | `alt_hosts` unused | ☑ | hosts iterated in `candidate_urls`, bounded by the state deadline |
 | F-12 | no HTTP fallback | ☑ | https then http, winner cached; cache honoured only if it still matches a configured host |
 | F-13 | luci rpc path is not ubus | ☑ | removed; confirmed 404 on hardware |
-| F-14 | `check` probed dead ports | ◐ | rewritten around the router's neighbour table |
+| F-14 | `check` probed dead ports | ☑ | rewritten around the router's neighbour table |
 | F-15 | rpcd session leaked per run | ☑ | session_timeout 30 s instead of 900 s |
 | S-01 | private key in the working tree | ☑ | mock_cert.pem / mock_key.pem deleted; generated into a temp dir at startup |
-| S-02 | root password in config.json | ◐ | scoped rpcd user + fixed-verb helper; config.json chmod 600 — see S-02.md |
-| S-03 | `verify_tls: false` | ◐ | `./xbox.py pin` records the fingerprint; checked after the handshake, before credentials are sent |
+| S-02 | root password in config.json | ☑ | scoped rpcd user + fixed-verb helper; config.json chmod 600 — see S-02.md |
+| S-03 | `verify_tls: false` | ☑ | `./xbox.py pin` records the fingerprint; checked after the handshake, before credentials are sent |
 | §8.4 | README corrections | ☑ | README rewritten; every v1 claim in REVIEW.1 §8.4 re-derived from v2's behaviour |
 | §8.5 | offline test suite | ☑ | 4 suites, 46 cases, 119 assertions, all passing |
 
@@ -138,7 +143,52 @@ important new tests were **mutation-checked**: reverting the multi-MAC rule and
 reverting the block exit code each make them fail, so they are not passing for
 the wrong reason.
 
-### Then, on hardware, in this order (REVIEW.2 §8.5)
+### Hardware verification — DONE 2026-09-15
+
+Run against the live router (OpenWrt 24.10.5, Cudy WR3000E) and the real console
+(on WiFi, `d8:e2:df:92:a9:90` / `192.168.2.169`) during an **online multiplayer
+game**.
+
+| check | result |
+|---|---|
+| `opkg install conntrack` | ✅ v1.4.8. Package is `conntrack`, **not** `conntrack-tools` — the bootstrap had the wrong name and would have silently failed |
+| `router_bootstrap.sh` | ✅ helper + ACL + scoped rpcd login |
+| `./xbox.py selftest` | ✅ **11/11 — the scoped ACL is sufficient**, which was the largest unknown |
+| `./xbox.py pin` | ✅ `65f6d012…e4e6947f`, matches the fingerprint measured independently at the start of the session |
+| `./xbox.py install` | ✅ **console stayed ONLINE** (F-01 proven) |
+| two-MAC rule in fw4 | ✅ live ruleset renders `ether saddr { d8:e2:df:92:a9:90, d8:e2:df:92:a9:93 }` — **G-02 proven; fw4 does accept the list** |
+| `getState` while gaming | ✅ `up` at **471.6 KB/min** outbound vs the 200 KB/min threshold |
+| **`block` during a live game** | ✅ **the multiplayer session disconnected** |
+| block cut the session | ✅ `established=0`, `nonDNS=0`, 4,613 packets REJECTed |
+| `getState` while blocked | ✅ `down` (3.0 KB/min out) |
+| `unblock` | ✅ rule removed from the live ruleset; console reconnected (7 established, 13 non-DNS flows) |
+| `unblock` over-call | ✅ "already internet ALLOWED (no change, nothing written)" |
+| `block` idempotency | ✅ second call writes nothing (F-09 on real hardware) |
+
+#### Three things measurement corrected
+
+1. **`uci apply` is redundant after `uci commit`** — it returns ubus status 5
+   (NO_DATA) because commit already flushed the change set and fired the reload
+   event itself. This settles REVIEW.1 F-09's open question. Treating that as an
+   error made `install` exit 1 despite having worked.
+2. **The fw4 reload is asynchronous.** The REJECT rule appears in the live
+   ruleset a moment *after* `block.sh` returns. A check run immediately after
+   the call will report the rule missing and be wrong.
+3. **A block is not instantaneous.** The rule takes effect at once for new
+   connections, but the game kept retrying for tens of seconds before it gave
+   up and disconnected. This is fine for a parental control — but "block"
+   means "within about a minute", not "instantly", and the README should not
+   imply otherwise.
+
+#### One thing that stays open by design
+
+While blocked the console can still reach the **router's own DNS** on
+`192.168.2.1:53`, because that is *input* traffic to the router and the rule
+governs *forwarded* lan→wan traffic. 45 of 46 remaining flows were DNS retries.
+It grants no internet access, so it is left alone — see REVIEW.1 F-08, which
+argued the same point in the opposite direction.
+
+### Superseded plan — kept for reference (REVIEW.2 §8.5)
 
 - [ ] `opkg update && opkg install conntrack-tools` (package lists are empty).
 - [ ] Run `router_bootstrap.sh`; record the printed facts here.
