@@ -1,0 +1,192 @@
+
+##### B1.1 FLOWTABLE (the big question: does offload bypass my counters?) #####
+-- firewall defaults --
+firewall.cfg01e63d=defaults
+firewall.cfg01e63d.input='REJECT'
+firewall.cfg01e63d.output='ACCEPT'
+firewall.cfg01e63d.forward='REJECT'
+firewall.cfg01e63d.synflood_protect='1'
+firewall.cfg01e63d.flow_offloading='1'
+firewall.cfg01e63d.flow_offloading_hw='1'
+flow_offloading    = 1
+flow_offloading_hw = 1
+-- flowtables --
+table inet fw4 {
+	flowtable ft {
+		hook ingress priority filter
+		devices = { lan1, lan2, lan3, lan4, wan }
+		flags offload
+		counter
+	}
+}
+-- flowtable detail (devices + flags; 'flags offload' means HARDWARE) --
+table inet fw4 {
+	flowtable ft {
+		hook ingress priority filter
+		devices = { lan1, lan2, lan3, lan4, wan }
+		flags offload
+		counter
+	}
+}
+-- DECISIVE: does the flowtable carry 'counter'? --
+   (if yes, offloaded flows still update conntrack byte accounting,
+    which makes conntrack a viable byte source even under offload)
+		devices = { lan1, lan2, lan3, lan4, wan }
+		flags offload
+		counter
+-- the flow add rule --
+4:		meta l4proto { tcp, udp } flow add @ft
+-- MediaTek PPE / hardware offload engine present? --
+nf_conntrack           90112  7 nft_redir,nft_nat,nft_masq,nft_flow_offload,nft_ct,nf_nat,nf_flow_table
+nf_flow_table          28672  2 nf_flow_table_inet,nft_flow_offload
+nf_flow_table_inet     12288  1 
+nf_tables             188416243 nft_fib_inet,nf_flow_table_inet,nft_reject_ipv6,nft_reject_ipv4,nft_reject_inet,nft_reject,nft_redir,nft_quota,nft_numgen,nft_nat,nft_masq,nft_log,nft_limit,nft_hash,nft_flow_offload,nft_fib_ipv6,nft_fib_ipv4,nft_fib,nft_ct,nft_chain_nat
+nft_flow_offload       12288  1 
+ppe0
+ppe1
+
+##### B1.2 ARE FLOWS ACTUALLY OFFLOADED RIGHT NOW #####
+total conntrack entries : 143
+marked [OFFLOAD]        : 12
+marked [HW_OFFLOAD]     : 12
+-- one offloaded entry, addresses masked --
+ipv4     2 tcp      6 src=<ip> dst=<ip> sport=41772 dport=443 packets=31534 bytes=8132750 src=<ip> dst=<ip> sport=443 dport=41772 packets=52243 bytes=35621510 [HW_OFFLOAD] mark=0 zone=0 use=3
+
+##### B1.3 CONNTRACK ACCOUNTING (a possible alternative byte source) #####
+net.netfilter.nf_conntrack_acct = 1
+-- does a conntrack line carry bytes= ? --
+bytes=402732
+bytes=20682
+
+##### B1.4 NETDEV INGRESS DRY RUN (the offload-proof accounting point) #####
+-- devices --
+br-lan eth0 lan1 lan2 lan3 lan4 lo phy0-ap0 phy1-ap0 wan wg0 
+-- br-lan ports --
+lan1 lan2 lan3 lan4 phy0-ap0 phy1-ap0 
+-- which port is the console on right now --
+console port = (not in fdb - console idle or absent)
+device list  = { "lan1", "lan2", "lan3", "lan4", "phy0-ap0", "phy1-ap0" }
+-- dry run A: multi-device ingress at priority -300 (before flowtable at 0) --
+DRY RUN OK: multi-device netdev ingress accepted
+-- dry run B: netdev EGRESS (would give a MAC-keyed INBOUND counter) --
+DRY RUN OK: netdev egress accepted (kernel >= 5.16)
+
+##### B1.5 EARLY-DROP DRY RUN (enforcement above fw4 established-accept) #####
+DRY RUN OK: own forward chain at priority -160 accepted
+-- what currently occupies forward priority mangle (-150) --
+	chain mangle_forward { # handle 34
+
+##### B1.6 USER / SHADOW PREREQUISITES (no contents printed) #####
+/etc/shadow exists     : yes
+/etc/passwd writable   : yes
+user 'kidsout' exists  : no
+uid 6000 free          : yes
+gid 6000 free          : yes
+passwd applet          : BusyBox v1.36.1 (2025-12-17 21:08:22 UTC) multi-call binary.
+shadow entries (count) : 9
+
+##### B1.7 RPCD FILE-EXEC CAPABILITY #####
+-- methods on the ubus 'file' object --
+	"read":{"path":"String","base64":"Boolean","ubus_rpc_session":"String"}
+	"list":{"path":"String","ubus_rpc_session":"String"}
+	"stat":{"path":"String","ubus_rpc_session":"String"}
+	"exec":{"command":"String","params":"Array","env":"Table","ubus_rpc_session":"String"}
+'file' @60c08e7d
+	"read":{"path":"String","base64":"Boolean","ubus_rpc_session":"String"}
+	"write":{"path":"String","data":"String","append":"Boolean","mode":"Integer","base64":"Boolean","ubus_rpc_session":"String"}
+	"list":{"path":"String","ubus_rpc_session":"String"}
+	"stat":{"path":"String","ubus_rpc_session":"String"}
+	"md5":{"path":"String","ubus_rpc_session":"String"}
+	"remove":{"path":"String","ubus_rpc_session":"String"}
+	"exec":{"command":"String","params":"Array","env":"Table","ubus_rpc_session":"String"}
+-- ACLs that grant exec (schema reference for my ACL) --
+/usr/share/rpcd/acl.d/luci-app-package-manager.json
+/usr/share/rpcd/acl.d/luci-mod-network.json
+/usr/share/rpcd/acl.d/luci-mod-status.json
+/usr/share/rpcd/acl.d/luci-mod-system.json
+--- /usr/share/rpcd/acl.d/luci-app-package-manager.json ---
+{
+	"luci-app-package-manager": {
+		"description": "Grant access to package management",
+		"read": {
+			"cgi-io": [ "exec" ],
+			"file": {
+				"/usr/libexec/package-manager-call list-installed": [ "exec" ],
+				"/usr/libexec/package-manager-call list-available": [ "exec" ],
+				"/etc/opkg.conf": [ "read" ],
+				"/etc/opkg/*.conf": [ "read" ],
+				"/etc/apk/repositories": [ "read" ],
+				"/etc/apk/repositories.d/distfeeds.list": [ "read" ],
+				"/etc/apk/repositories.d/customfeeds.list": [ "read" ]
+			},
+			"ubus": {
+				"luci": [ "getMountPoints" ]
+			}
+		},
+		"write": {
+			"file": {
+				"/usr/libexec/package-manager-call install": [ "exec" ],
+				"/usr/libexec/package-manager-call install *": [ "exec" ],
+				"/usr/libexec/package-manager-call remove *": [ "exec" ],
+				"/usr/libexec/package-manager-call update": [ "exec" ],
+				"/usr/libexec/package-manager-call upgrade": [ "exec" ],
+				"/usr/libexec/package-manager-call upgrade *": [ "exec" ],
+				"/etc/opkg.conf": [ "write" ],
+				"/etc/opkg/*.conf": [ "write" ],
+				"/etc/apk/repositories": [ "write" ],
+				"/etc/apk/repositories.d/distfeeds.list": [ "write" ],
+				"/etc/apk/repositories.d/customfeeds.list": [ "write" ],
+				"/tmp/upload.ipk": [ "write" ],
+				"/tmp/upload.apk": [ "write" ]
+			}
+		}
+	}
+}
+
+##### B1.8 PACKAGE AVAILABILITY #####
+-- is conntrack-tools in the cached package lists? --
+drwxr-xr-x    2 root     root            40 Sep 11 00:02 .
+drwxrwxrwt   20 root     root           520 Sep 15 10:21 ..
+-- overlay free --
+/dev/ubi0_2              44.7M    844.0K     41.5M   2% /overlay
+
+##### B1.10 WILDCARD ZONE SUPPORT (does fw4 accept dest=*?) #####
+-- wildcard handling in fw4 ucode --
+1057:		if (val == 'any' || val == 'all' || val == '*')
+1071:		if (val == '*')
+1092:		if (rv.val == '*')
+1154:		case '*':
+2137:				device.device = m[1] + '*';
+2374:			this.warn_section(data, "must not specify '*' as device");
+2734:				return this.warn_section(data, "must not have source '*' for dnat target");
+2761:				return this.warn_section(data, "must not have destination '*' for snat target");
+-- zone_ref / any-zone parsing --
+1067:	parse_zone_ref: function(val) {
+1929:			this.warn("Helper definition '%s' must not specify wildcard protocol", data.name || data['.name']);
+2095:			r.devices_neg_wildcard = null_if_empty(devices[2]);
+2113:		// group non-inverted device matches into wildcard and non-wildcard ones
+2114:		let devices = [], plain_devices = [], plain_invert_devices = [], wildcard_invert_devices = [];
+2120:				this.warn_section(data, `skipping invalid wildcard pattern '${device.device}'`);
+2125:			// wildcard only matches
+2139:			device.wildcard = !!m[2];
+2141:			if (!device.invert && device.wildcard)
+2142:				push(devices, [ [ device.device ], plain_invert_devices, wildcard_invert_devices ]);
+2145:			else if (device.wildcard)
+2146:				push(wildcard_invert_devices, device.device);
+
+##### B1.9 UHTTPD REDIRECT #####
+uhttpd.main.redirect_https='1'
+uhttpd.main.rfc1918_filter='1'
+uhttpd.main.ubus_prefix='/ubus'
+
+##### B1.11 DO OFFLOADED FLOWS STILL COUNT BYTES (settles the whole design) #####
+-- accounting enabled? --
+nf_conntrack_acct = 1
+[OFFLOAD] flows 13->14  bytes delta over 5s = 0
+        static -> either idle, or accounting is bypassed
+[HW_OFFLOAD] flows 14->16  bytes delta over 5s = 0
+        static -> either idle, or accounting is bypassed
+[ASSURED] flows 59->58  bytes delta over 5s = -1289885
+        static -> either idle, or accounting is bypassed
+
+##### END OF B1 — nothing was modified #####

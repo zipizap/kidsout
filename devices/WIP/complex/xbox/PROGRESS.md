@@ -137,7 +137,74 @@ Check B (`router_checks_B1.sh`, `router_checks_B2.sh`) is designed to settle:
 whether offload is software or hardware, how many live flows carry `[OFFLOAD]`,
 whether `nf_conntrack_acct` offers an alternative byte source, and whether a
 `netdev ingress` chain — which runs before the flowtable fast path — is accepted.
-**The accounting design is on hold until that comes back.**
+
+## Check B — 2026-09-15: the offload question is SETTLED
+
+Full output in `router_checks_B1.sh.printout`. The console was **off the network**
+during this run (no DHCP lease, neighbour `FAILED`, zero conntrack flows), so the
+console-specific parts of B2 are still pending; but the design question was
+answerable without it.
+
+| fact | value | consequence |
+|---|---|---|
+| `flow_offloading` | `1` | offload is on |
+| `flow_offloading_hw` | **`1`** | **hardware** offload, via the MediaTek PPE (`ppe0`, `ppe1` in debugfs) |
+| flowtable | `devices = { lan1..lan4, wan }`, `flags offload`, **`counter`** | the `counter` flag is the one that saves us — see below |
+| `nf_conntrack_acct` | `1` | conntrack carries `bytes=` per direction |
+| offloaded flows | 12–16 of ~143 carry `[HW_OFFLOAD]` | offload is not theoretical, it is carrying real traffic |
+| **per-flow byte test** | **9 of 9 HW-offloaded flows gained bytes over 20 s, 0 static** | **conntrack accounting is fed by the PPE hardware path** |
+| netdev ingress/egress | multi-device dry runs both OK on `lan1..lan4, phy0-ap0, phy1-ap0` | available, but pointless under HW offload (packets never reach the CPU) |
+| forward chain @ -160 | dry run OK; `mangle_forward` occupies -150 | unchanged from check A |
+| bootstrap prereqs | uid/gid 6000 free, `kidsout` absent, `/etc/shadow` ok, `file exec` exposed | `router_bootstrap.sh` can run as written |
+| `/var/opkg-lists/` | **empty** | `opkg update` is required before conntrack-tools will install |
+| `bridge` command | **not installed** | fdb-based port lookup does not work here; use `ip neigh` / per-port counters |
+| uhttpd | `redirect_https='1'` | explains the HTTP 307 seen from the kidsout machine |
+
+### The decision: F-06 moves from nft counters to conntrack byte accounting
+
+The shipped design counts bytes with an nft counter at `hook forward priority -160`.
+**That design is dead on this router.** Hardware-offloaded packets are forwarded by
+the PPE in silicon and never enter the CPU's netfilter forward hook, so the counter
+would see only each flow's first packets and report `down` during real gameplay.
+No software hook can fix this: `netdev ingress` would also be bypassed.
+
+What rescues it is that fw4 declares its flowtable with `counter`, and in Linux 6.6
+`nf_flow_table_offload.c` feeds the hardware's per-flow MIB back into conntrack via
+`nf_ct_acct_add()` on a ~1 Hz poll. The per-flow test above confirms this empirically
+on *this* SoC, which was the one assumption that could not be taken from source.
+
+So the byte source becomes **conntrack**, summed router-side per direction:
+
+- no nft table, no chain, no priority, no device names, nothing to survive an fw4
+  reload, nothing to re-create after a reboot;
+- works identically under software offload, hardware offload, or none;
+- nothing breaks when the console moves between ethernet and either wifi band —
+  which is the failure mode that would have made a `netdev ingress` design report
+  `down` forever, silently;
+- needs no package: `/proc/net/nf_conntrack` is always there.
+
+Its one real difficulty is that a sum over live flows is **not monotonic** — entries
+vanish when flows expire. B1.11 demonstrated this directly: the `[ASSURED]` aggregate
+moved **−1,289,885 bytes** in five seconds purely from flows ageing out. The helper
+must therefore keep a per-flow accumulator (`total += max(0, cur - last_seen)`, keyed
+on conntrack id) rather than diffing a naive sum.
+
+Trade-off accepted: conntrack is keyed on the console's **IP**, not its MAC, which
+gives up F-04's IPv6 coverage. Safe here — check A established the ISP delegates no
+IPv6 and the console has a static reservation — but it must be revisited if that
+changes. The MAC-keyed *enforcement* rule is unaffected and stays as it is.
+
+### Second finding: offload defeats enforcement too, and the flush is currently a no-op
+
+If an established flow is offloaded and the REJECT rule is then enabled, the flow
+keeps running in the fast path — `forward_lan` is never reached. An fw4 reload alone
+does not help: the conntrack entry survives, hits `ct state established : accept`, and
+is immediately re-offloaded. **Only destroying the conntrack entry breaks it.**
+
+That makes F-05's conntrack flush load-bearing rather than an optimisation — and
+`conntrack-tools` is still not installed, so today `flush` silently does nothing while
+`cmd_block` returns success. `block.sh` would report success to kidsout while the
+console kept playing. Fixing that is now a correctness bug, not a contingency.
 
 ## Earlier facts, from before any credential existed
 
