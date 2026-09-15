@@ -38,9 +38,9 @@ Legend: ☐ not started · ◐ code written, unverified on hardware · ☑ verif
 | F-01 | block/allow polarity inverted | ◐ | one MAC rule; `enabled=1` blocks; install lands ALLOWED; prints meanings, not uci values |
 | F-02 | `unknown` unreachable; all errors → `down` | ◐ | no bare `except: continue`; nine failure paths asserted in test_failure_modes.py |
 | F-03 | getState 61 s vs 10 s budget | ◐ | state_timeout 1.5 s, hard deadline 4 s, memoised login failure, one path, no fallback chain |
-| F-04 | IPv6 not blocked | ◐ | rule keyed on `src_mac`; needs `device.json.mac` from discover |
-| F-05 | block does not cut live sessions | ◐ | conntrack flushed for IPv4 + any IPv6 from the neighbour table; needs conntrack-tools |
-| F-06 | Instant-On standby reads `up` forever | ◐ | nft byte counters; threshold still a guess until calibrated — see F-06.md |
+| F-04 | IPv6 not blocked | ⚠ | rule keyed on `src_mac`, but device.json names only the **ethernet** MAC while the console is on **WiFi** — the block would not match. Needs both MACs. No IPv6 on this ISP, so the original concern is moot |
+| F-05 | block does not cut live sessions | ⚠ | **more severe than reviewed**: with hardware offload an in-progress session bypasses the REJECT entirely, so the flush is the whole mechanism. conntrack-tools still absent → flush is a silent no-op and `cmd_block` still returns success |
+| F-06 | Instant-On standby reads `up` forever | ◐ | **nft counters abandoned** (hardware offload bypasses the forward hook); metric moves to conntrack byte accounting. Threshold 200 KB/min now **calibrated against the real console** — see F-06.md |
 | F-07 | source-port regex never matches | ☑ | dissolved: conntrack parsing retired entirely; metric now stated in test_state.py's docstring |
 | F-08 | third rule was a forward rule | ◐ | deleted, along with `_fwd_in`; install migrates the old sections away |
 | F-09 | commit + reload every 60 s | ☑ | `_set_enabled` reads first and writes only when stale; asserted offline |
@@ -79,20 +79,21 @@ Two real defects in v2 were found by writing these tests, not by review:
 - [ ] Run `router_bootstrap.sh`; record the printed facts here.
 - [ ] `./xbox.py selftest` green (proves the ACL scope is sufficient).
 - [ ] `./xbox.py pin`.
-- [ ] `./xbox.py discover --write` with the console on.
+- [ ] `./xbox.py discover --write` — must be taught to record **both** MACs
+      (ethernet `...93`/.172 and WiFi `...90`/.169), not just whichever is live.
 - [ ] `./xbox.py install` → **console still online** (proves the F-01 fix).
 - [ ] Confirm the live ruleset, not just the committed config:
       `nft list ruleset | grep -A3 kidsout_xbox` after a block — this settles
       REVIEW.1's open question about whether the explicit `uci apply` after
       `uci commit` is redundant.
 - [ ] `block` → an *in-progress* game or stream dies within seconds (F-05).
-- [ ] Confirm `ether saddr` actually matches in the forward hook on this router:
-      `xbox_out` must move while the console is active. If it stays at zero
-      while `xbox_in` moves, the MAC match is not working and both the rule and
-      the counter need rethinking.
-- [ ] Check for a global IPv6 address on the console (REVIEW.1 Q1).
+- [x] ~~Confirm `ether saddr` matches in the forward hook~~ — **answered, negatively**:
+      hardware offload bypasses the forward hook entirely, so no counter there can
+      work. Metric moved to conntrack byte accounting (verified working).
+- [x] ~~Check for a global IPv6 address on the console~~ — no IPv6 delegation (check A).
 - [ ] `unblock` → recovery.
-- [ ] Calibration session → fill in F-06.md and set the real threshold.
+- [x] ~~Calibration session~~ — done 2026-09-15: idle 20.8 / downloading 93.7 /
+      gaming 289.5 KB/min outbound. 200 KB/min threshold confirmed. See F-06.md.
 - [ ] Pull the router's power mid-tick → `unknown` inside the deadline.
 
 ## Hardware facts — read-only check A, 2026-09-11
@@ -194,7 +195,33 @@ gives up F-04's IPv6 coverage. Safe here — check A established the ISP delegat
 IPv6 and the console has a static reservation — but it must be revisited if that
 changes. The MAC-keyed *enforcement* rule is unaffected and stays as it is.
 
-### Second finding: offload defeats enforcement too, and the flush is currently a no-op
+### Second finding: the console has TWO MACs, and device.json only knows one
+
+The console was measured on WiFi as `d8:e2:df:92:a9:90` → `192.168.2.169`
+(dynamic lease, hostname `XBOX`, `phy0-ap0`, −60 dBm). But `device.json` and the
+static reservation `dhcp.@host[1]` both describe `d8:e2:df:92:a9:93` →
+`192.168.2.172` — the **ethernet** interface, which was unplugged during the
+session (`lan1`/`lan2` carrier 0, neighbour `FAILED`, zero conntrack flows).
+
+Consoles have separate MACs for wired and wireless. As shipped, therefore:
+
+- **the block would silently fail open.** `block.sh` enables a `src_mac` REJECT
+  rule for `...93`. On WiFi the console is `...90`, which that rule does not match.
+  The driver would report success while the console kept playing — the exact
+  failure class REVIEW.1 F-04 was written to prevent, reached by another route.
+- **the state metric would read nothing.** Accounting keyed on `.172` sees zero
+  bytes while the console is on `.169`, so `getState.sh` would report `down`
+  forever and no time would ever be accrued.
+
+Fix: `device.json` must carry **both** MACs and both addresses, and the driver must
+use whichever is live. fw4 parses `src_mac` as a list (`fw4.uc:2314`, `PARSE_LIST`),
+so a single rule can name both. Accounting should resolve the console's current
+address(es) from the lease/neighbour table by MAC rather than trusting a static IP.
+
+Note also that `.169` has **no static reservation**, so that address can change.
+Either add a reservation for `...90`, or resolve dynamically — preferably both.
+
+### Third finding: offload defeats enforcement too, and the flush is currently a no-op
 
 If an established flow is offloaded and the REJECT rule is then enabled, the flow
 keeps running in the fast path — `forward_lan` is never reached. An fw4 reload alone
