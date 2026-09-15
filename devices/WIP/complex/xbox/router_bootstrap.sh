@@ -159,7 +159,6 @@ info)
 	;;
 
 counters)
-	[ -r /proc/net/nf_conntrack ] || { echo "/proc/net/nf_conntrack unreadable" >&2; exit 3; }
 	[ -s "$ADDRS" ] || { echo "no addresses registered" >&2; exit 4; }
 
 	# Fold the live conntrack table into a monotonic accumulator.
@@ -171,7 +170,23 @@ counters)
 	# looked; for a flow we have not seen before, add all of it; a flow that
 	# disappeared simply stops contributing. The running total never
 	# decreases, which is exactly what the driver's sample_rate() expects.
-	awk -v addrfile="$ADDRS" -v statefile="$STATE" '
+	#
+	# Prefer `conntrack -L -o id`: the id is unique per entry, so a reused
+	# 5-tuple is correctly seen as a NEW flow rather than as a counter reset.
+	# /proc/net/nf_conntrack has no id column, hence the tuple-keyed fallback.
+	# Decide the source BEFORE the pipeline: `awk -v src="$src"` is expanded
+	# when the pipeline is built, so assigning src inside it comes too late.
+	if have conntrack && conntrack -L -o id >/dev/null 2>&1; then
+		src=conntrack
+	else
+		src=proc
+	fi
+	{ if [ "$src" = conntrack ]; then
+		conntrack -L -o id 2>/dev/null
+	  else
+		cat /proc/net/nf_conntrack 2>/dev/null
+	  fi
+	} | awk -v addrfile="$ADDRS" -v statefile="$STATE" -v src="$src" '
 	BEGIN {
 		while ((getline a < addrfile) > 0) if (a != "") addr[a] = 1
 		close(addrfile)
@@ -184,10 +199,10 @@ counters)
 		close(statefile)
 	}
 	{
-		# Does this entry belong to the console? Match the ORIGINAL tuple
-		# only, and anchored on src=/dst=, so 192.168.2.17 cannot match
-		# 192.168.2.172 and a remote host NATed toward us is not counted.
-		osrc = ""; odst = ""; osp = ""; odp = ""
+		# Match the ORIGINAL tuple only, anchored on src=/dst=, so
+		# 192.168.2.17 cannot match 192.168.2.172 and a remote host NATed
+		# toward us is not counted as ours.
+		osrc = ""; odst = ""; osp = ""; odp = ""; id = ""
 		dir = 0; o = 0; i2 = 0
 		for (k = 1; k <= NF; k++) {
 			if ($k ~ /^src=/) {
@@ -197,6 +212,7 @@ counters)
 			else if ($k ~ /^dst=/)   { split($k, a, "="); if (odst == "") odst = a[2] }
 			else if ($k ~ /^sport=/) { split($k, a, "="); if (osp  == "") osp  = a[2] }
 			else if ($k ~ /^dport=/) { split($k, a, "="); if (odp  == "") odp  = a[2] }
+			else if ($k ~ /^id=/)    { split($k, a, "="); id = a[2] }
 			else if ($k ~ /^bytes=/) {
 				split($k, a, "=")
 				if (dir == 1) o += a[2]; else i2 += a[2]
@@ -204,7 +220,7 @@ counters)
 		}
 		if (!(osrc in addr) && !(odst in addr)) next
 
-		key = $3 "|" osrc ":" osp ">" odst ":" odp
+		key = (id != "") ? "i" id : "t" osrc ":" osp ">" odst ":" odp
 		if (key in po) {
 			d = o - po[key];  if (d > 0) tot_out += d
 			e = i2 - pi[key]; if (e > 0) tot_in  += e
@@ -221,8 +237,8 @@ counters)
 		system("mv " tmp " " statefile)
 		printf "xbox_out %d\n", tot_out
 		printf "xbox_in %d\n",  tot_in
-		print  "source conntrack"
-	}' /proc/net/nf_conntrack
+		printf "source %s\n",   src
+	}'
 	;;
 
 counters-install)
@@ -371,7 +387,7 @@ if command -v conntrack >/dev/null 2>&1; then
 else
 	say "installing conntrack-tools (needed to cut in-progress sessions)"
 	opkg update >/dev/null 2>&1 || say "warning: opkg update failed"
-	if opkg install conntrack-tools >/dev/null 2>&1; then
+	if opkg install conntrack >/dev/null 2>&1; then
 		say "conntrack-tools installed"
 	else
 		say "WARNING: could not install conntrack-tools. Blocking will still stop"

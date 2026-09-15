@@ -68,8 +68,9 @@ conntrack entry is the *only* thing that cuts a live session.
 
 So `block` enables the rule **and** flushes the console's flows — and if the flush
 fails it **exits non-zero** rather than reporting a success it did not achieve.
-This needs `conntrack-tools` on the router; `./xbox.py selftest` fails loudly if it
-is missing.
+This needs the `conntrack` package on the router (the OpenWrt package is named
+`conntrack`, not `conntrack-tools`); `./xbox.py selftest` fails loudly if it is
+missing.
 
 ## How state detection works
 
@@ -137,11 +138,11 @@ facts. `sh /tmp/router_bootstrap.sh --uninstall` reverses everything.
 Why a helper rather than a root credential, and what the ACL does and does not
 permit: [S-02.md](S-02.md).
 
-Also install conntrack-tools if `conntrack_tools=no` in the printed facts —
+Also install the `conntrack` package if `conntrack_tools=no` in the printed facts —
 without it, blocking cannot cut a session already in progress:
 
 ```
-ssh root@192.168.2.1 'opkg update && opkg install conntrack-tools'   # or apk add
+ssh root@192.168.2.1 'opkg update && opkg install conntrack'   # NOT 'conntrack-tools'
 ```
 
 ### 2. On this machine — credentials
