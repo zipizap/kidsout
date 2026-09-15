@@ -1,0 +1,239 @@
+root@OpenWrt:~# sh /tmp/router_checks_A.sh
+
+##### 1 IDENTITY #####
+distrib : OpenWrt 24.10.5 r29087-d9c5716d1d mediatek/filogic
+Linux 6.6.119 aarch64
+uptime  :  16:32:28 up 7 days, 22:51,  load average: 0.05, 0.02, 0.00
+
+##### 2 FIREWALL FLAVOUR #####
+fw4      : yes (/sbin/fw4)
+fw3      : yes (/sbin/fw3)
+nft      : yes (/usr/sbin/nft)
+iptables : NO
+nftables v1.1.1 (Commodore Bullmoose #2)
+-- packages --
+firewall4 - 2024.12.18~18fc0ead-r1
+libnftnl11 - 1.2.8-r1
+nftables-json - 1.1.1-r1
+rpcd - 2025.09.01~bba95191-r1
+rpcd-mod-file - 2025.09.01~bba95191-r1
+rpcd-mod-iwinfo - 2025.09.01~bba95191-r1
+rpcd-mod-luci - 20240305-r1
+rpcd-mod-rrdns - 20170710
+rpcd-mod-ucode - 2025.09.01~bba95191-r1
+ucode - 2025.07.18~3f64c808-r1
+ucode-mod-fs - 2025.07.18~3f64c808-r1
+ucode-mod-html - 1
+ucode-mod-math - 2025.07.18~3f64c808-r1
+ucode-mod-nl80211 - 2025.07.18~3f64c808-r1
+ucode-mod-rtnl - 2025.07.18~3f64c808-r1
+ucode-mod-ubus - 2025.07.18~3f64c808-r1
+ucode-mod-uci - 2025.07.18~3f64c808-r1
+ucode-mod-uloop - 2025.07.18~3f64c808-r1
+uhttpd - 2025.07.06~7e64e8ba-r4
+uhttpd-mod-ubus - 2025.07.06~7e64e8ba-r4
+
+##### 3 FIREWALL ZONES #####
+firewall.@zone[0]=zone
+firewall.@zone[0].name='lan'
+firewall.@zone[0].network='lan'
+firewall.@zone[1]=zone
+firewall.@zone[1].name='wan'
+firewall.@zone[1].network='wan' 'wan6'
+firewall.@rule[0].name='Allow-DHCP-Renew'
+firewall.@rule[1].name='Allow-Ping'
+firewall.@rule[2].name='Allow-IGMP'
+firewall.@rule[3].name='Allow-DHCPv6'
+firewall.@rule[4].name='Allow-MLD'
+firewall.@rule[5].name='Allow-ICMPv6-Input'
+firewall.@rule[6].name='Allow-ICMPv6-Forward'
+firewall.@rule[7].name='Allow-IPSec-ESP'
+firewall.@rule[8].name='Allow-ISAKMP'
+firewall.@zone[2]=zone
+firewall.@zone[2].name='WgZone'
+firewall.@zone[2].network='wg0'
+firewall.@ipset[0].name='my-lan-VIIPs'
+firewall.@rule[9].name='Allow-wg-2-VIIPs :)'
+-- zone names --
+firewall.@zone[0].name='lan'
+firewall.@zone[1].name='wan'
+firewall.@zone[2].name='WgZone'
+
+##### 4 EXISTING KIDSOUT STATE (expected: all empty) #####
+-- uci firewall --
+(none)
+-- nft tables --
+table inet fw4
+-- helper/acl --
+ls: /usr/libexec/kidsout-xbox: No such file or directory
+ls: /usr/share/rpcd/acl.d/kidsout-xbox.json: No such file or directory
+-- libexec dir --
+drwxr-xr-x    1 root     root           224 Jul 17 01:21 /usr/libexec
+
+##### 5 src_mac SUPPORT IN fw4 #####
+-- occurrences in fw4 ucode --
+2314:                   src_mac: [ "mac", null, PARSE_LIST ],
+2423:                           smacs_pos: map(filter_pos(rule.src_mac), m => m.mac),
+2424:                           smacs_neg: map(filter_neg(rule.src_mac), m => m.mac),
+2629:                   src_mac: [ "mac", null, PARSE_LIST ],
+2768:                   else if (redir.src_mac)
+2769:                           return this.warn_section(data, "must not use 'src_mac' option for snat target");
+2794:                           smacs_pos: map(filter_pos(redir.src_mac), m => m.mac),
+2795:                           smacs_neg: map(filter_neg(redir.src_mac), m => m.mac),
+-- rendered ruleset, first forward rules --
+70:     chain forward {
+71-             type filter hook forward priority filter; policy drop;
+72-
+--
+115:    chain forward_lan {
+116-            jump accept_to_wan comment "!fw4: Accept lan to wan forwarding"
+117-            jump accept_to_WgZone comment "!fw4: Accept lan to WgZone forwarding"
+--
+147:    chain forward_wan {
+148-            jump reject_to_wan
+149-    }
+--
+172:    chain forward_WgZone {
+173-            ip daddr { 192.168.2.172, 192.168.2.234, 192.168.2.237 } counter jump accept_to_lan comment "!fw4: Allow-wg-2-VIIPs :)"
+174-            jump accept_to_WgZone
+
+##### 6 NFT DRY RUN (check-only: -c never loads anything) #####
+DRY RUN OK: counters + ether saddr + priority -150 all accepted
+-- nft json support --
+nft -j: YES
+-- existing chains at priority <= -150 (conflict check) --
+                type filter hook forward priority filter; policy drop;
+                type filter hook prerouting priority filter; policy accept;
+                type filter hook prerouting priority raw; policy accept;
+                type filter hook prerouting priority mangle; policy accept;
+                type filter hook forward priority mangle; policy accept;
+-- ruleset size --
+188
+
+##### 7 RPCD AND ACLS #####
+-- /etc/config/rpcd (passwords redacted) --
+config rpcd
+        option socket /var/run/ubus/ubus.sock
+        option timeout 30
+
+config login
+        option username 'root'
+        option password '<redacted>'
+        list read '*'
+        list write '*'
+
+-- login sections --
+rpcd.@login[0]=login
+rpcd.@login[0].username='root'
+rpcd.@login[0].password=<redacted>
+rpcd.@login[0].read='*'
+rpcd.@login[0].write='*'
+-- acl.d contents --
+-rw-r--r--    1 root     root           411 Jul  2 06:29 luci-app-firewall.json
+-rw-r--r--    1 root     root          1279 Dec 17  2025 luci-app-package-manager.json
+-rw-r--r--    1 root     root           946 Dec 17  2025 luci-base.json
+-rw-r--r--    1 root     root          1843 Dec 17  2025 luci-mod-network.json
+-rw-r--r--    1 root     root          1463 Dec 17  2025 luci-mod-status-index.json
+-rw-r--r--    1 root     root          1969 Dec 17  2025 luci-mod-status.json
+-rw-r--r--    1 root     root          4691 Dec 17  2025 luci-mod-system.json
+-rw-r--r--    1 root     root           365 Jul  2 06:29 luci-wireguard.json
+-rw-r--r--    1 root     root           179 Dec 17  2025 unauthenticated.json
+-- an ACL that uses file exec (schema reference) --
+/usr/share/rpcd/acl.d/luci-app-firewall.json
+/usr/share/rpcd/acl.d/luci-app-package-manager.json
+/usr/share/rpcd/acl.d/luci-base.json
+--- /usr/share/rpcd/acl.d/luci-app-firewall.json ---
+{
+        "luci-app-firewall": {
+                "description": "Grant access to firewall configuration",
+                "read": {
+                        "file": {
+                                "/etc/firewall.user": [ "read" ]
+                        },
+                        "ubus": {
+                                "file": [ "read" ],
+                                "luci": [ "getConntrackHelpers" ]
+                        },
+                        "uci": [ "firewall" ]
+                },
+                "write": {
+                        "file": {
+                                "/etc/firewall.user": [ "write" ]
+                        },
+                        "ubus": {
+                                "file": [ "write" ]
+                        },
+                        "uci": [ "firewall" ]
+                }
+        }
+}
+-- ubus objects --
+file
+service
+session
+system
+uci
+-- all ubus objects (count) --
+39
+
+##### 8 PASSWORD HASHING TOOLS #####
+cryptpw  : NO
+mkpasswd : NO
+openssl  : NO
+passwd   : yes (/bin/passwd)
+-- dummy hash of the literal string 'dummy' (not a real password) --
+
+##### 9 CONNTRACK #####
+conntrack tool : NO
+-- /proc/net/nf_conntrack --
+-r--r-----    1 root     root             0 Sep 11 16:32 /proc/net/nf_conntrack
+entries: 159
+-- established timeout (F-05's 5-day figure) --
+net.netfilter.nf_conntrack_tcp_timeout_established = 7440
+-- early established accept in the forward chain --
+table inet fw4 {
+        chain forward {
+                type filter hook forward priority filter; policy drop;
+                meta l4proto { tcp, udp } flow add @ft
+                ct state vmap { established : accept, related : accept } comment "!fw4: Handle forwarded flows"
+                iifname "br-lan" jump forward_lan comment "!fw4: Handle lan IPv4/IPv6 forward traffic"
+                iifname "wan" jump forward_wan comment "!fw4: Handle wan IPv4/IPv6 forward traffic"
+                iifname "wg0" jump forward_WgZone comment "!fw4: Handle WgZone IPv4/IPv6 forward traffic"
+                jump handle_reject
+        }
+}
+
+##### 10 IPv6 #####
+-- default v6 route (does the ISP delegate a prefix?) --
+-- global v6 on the LAN bridge --
+    inet6 fd0c:cfee:9422::1/60 scope global noprefixroute
+    inet6 fe80::82af:caff:fe92:48eb/64 scope link proto kernel_ll
+-- v6 neighbours total --
+20
+
+##### 11 XBOX IDENTITY (console is OFF, so stale entries are expected) #####
+-- lease for 192.168.2.172 --
+1789164615 d8:e2:df:92:a9:93 192.168.2.172 XBOX 01:d8:e2:df:92:a9:93
+-- other leases: 13 --
+-- neighbour entry for 192.168.2.172 --
+192.168.2.172 dev br-lan FAILED
+-- static DHCP reservation for 192.168.2.172 --
+dhcp.@host[1].ip='192.168.2.172'
+
+##### 12 UHTTPD / TRANSPORT #####
+uhttpd.main.listen_http='0.0.0.0:80' '[::]:80'
+uhttpd.main.listen_https='0.0.0.0:443' '[::]:443'
+uhttpd.main.cert='/etc/uhttpd.crt'
+uhttpd.main.key='/etc/uhttpd.key'
+uhttpd.main.ubus_prefix='/ubus'
+uhttpd.defaults=cert
+uhttpd.defaults.key_type='ec'
+
+##### 13 STORAGE (F-09 context) #####
+/dev/ubi0_2 on /overlay type ubifs (rw,noatime,assert=read-only,ubi=0,vol=2)
+overlayfs:/overlay on / type overlay (rw,noatime,lowerdir=/,upperdir=/overlay/upper,workdir=/overlay/work,xino=off)
+Filesystem                Size      Used Available Use% Mounted on
+/dev/ubi0_2              44.7M    840.0K     41.5M   2% /overlay
+
+##### END OF CHECKS — nothing was modified #####
+

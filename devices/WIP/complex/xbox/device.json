@@ -1,0 +1,35 @@
+{
+  "id": "xbox",
+  "display_name": "Xbox (kidsout device)",
+  "hostname": "xbox.infracon.ovh",
+  "ipv4": "192.168.2.172",
+  "mac": "d8:e2:df:92:a9:93",
+  "comment": "MAC confirmed on the router 2026-09-11 (DHCP lease, hostname XBOX, Microsoft OUI d8:e2:df). The firewall rule matches on the MAC, so it covers IPv6 and survives the IP changing; the IPv4 is still used for the inbound byte counter and for conntrack flushing. A static DHCP reservation already exists at dhcp.@host[1].",
+  "network": {
+    "zone": "lan",
+    "wan_zone": "wan"
+  },
+  "router": {
+    "primary_host": "192.168.2.1",
+    "alt_hosts": [
+      "192.168.255.7"
+    ],
+    "https_port": 443,
+    "http_port": 80,
+    "ubus_path_candidates": [
+      "/ubus"
+    ],
+    "tls_sha256": null,
+    "_comment": "ubus_path_candidates was trimmed to the one path that answers: /cgi-bin/luci/rpc/ubus is luci-mod-rpc, a different API, and 404s here. tls_sha256 is set by './xbox.py pin'."
+  },
+  "state": {
+    "threshold_bytes_per_min": 204800,
+    "max_sample_age_s": 300,
+    "rule_audit_period_s": 900,
+    "_comment": "'up' means the console's outbound byte rate exceeded threshold_bytes_per_min since the previous sample. Calibrate against the real console with './xbox.py calibrate' \u2014 see F-06.md. A sample older than max_sample_age_s is discarded as stale and reported as 'unknown' rather than averaged over the gap."
+  },
+  "rules": {
+    "prefix": "kidsout_xbox",
+    "description": "Firewall uci sections named kidsout_xbox* belong to kidsout. block/allow only toggle their 'enabled' option: enabled=1 means the REJECT rule is in force (internet blocked), enabled=0 means it is absent (internet allowed). Nothing else on the router is touched."
+  }
+}

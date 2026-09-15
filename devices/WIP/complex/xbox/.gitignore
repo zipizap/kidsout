@@ -1,0 +1,8 @@
+config.json
+.state.json
+xbox.log
+calibration.jsonl
+mock_cert.pem
+mock_key.pem
+__pycache__/
+*.pyc

@@ -1,0 +1,12 @@
+{
+  "username": "kidsout",
+  "password": "CHANGE_ME",
+  "https": true,
+  "allow_http_fallback": true,
+  "verify_tls": false,
+  "timeout": 10,
+  "state_timeout": 1.5,
+  "state_deadline": 4,
+  "session_timeout": 30,
+  "_comment": "Copy to config.json, chmod 600, and set the password you chose when running router_bootstrap.sh on the router. Do NOT put the router root password here: the 'kidsout' rpcd user created by the bootstrap can only toggle its own firewall rules and run one fixed-verb helper. 'timeout' is per HTTP request for interactive commands; 'state_timeout' and 'state_deadline' bound the getState path, which must finish inside kidsout's 10s limit. verify_tls stays false for a self-signed router certificate — run './xbox.py pin' to record its fingerprint instead, which closes the LAN MITM window without needing a real CA."
+}
