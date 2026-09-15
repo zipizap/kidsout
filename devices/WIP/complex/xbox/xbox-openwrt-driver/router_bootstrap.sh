@@ -392,7 +392,8 @@ esac
 printf '\n'
 say "set the password for '$RPCD_USER' — you will be prompted twice."
 say "this is NOT the router root password. Pick a fresh one, and put the same"
-say "value into devices/xbox/config.json on the machine that runs kidsout."
+say "value into devices/xbox/xbox-openwrt-driver/config.json on the machine"
+say "that runs kidsout."
 printf '\n'
 passwd "$RPCD_USER" < /dev/tty || die "passwd failed; '$RPCD_USER' has no password"
 STORED="\$p\$${RPCD_USER}"

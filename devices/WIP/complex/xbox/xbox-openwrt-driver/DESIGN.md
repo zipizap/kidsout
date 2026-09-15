@@ -40,15 +40,31 @@ one-minute tick. This directory implements them for the Xbox.
 
 ```
 devices/xbox/
-├── getState.sh block.sh unblock.sh   the upstream contract
-├── allow.sh install.sh status.sh     operator conveniences
-├── xbox.py                           the driver (stdlib only, no pip deps)
-├── device.json                       device facts: interfaces, thresholds, router
-├── config.example.json               credential template → copy to config.json
-├── router_bootstrap.sh               ONE-TIME, runs ON THE ROUTER
-├── mock_router.py test_*.py run_tests.sh   the offline suite
-└── xbox.log .state.json              driver-owned log and sample state (gitignored)
+├── getState.sh block.sh unblock.sh       the upstream contract — these three
+│                                         names are all kidsout ever calls
+└── xbox-openwrt-driver/                  everything else lives here
+    ├── xbox.py                           the driver (stdlib only, no pip deps)
+    ├── allow.sh install.sh status.sh     operator conveniences
+    ├── device.json                       device facts: interfaces, thresholds, router
+    ├── config.example.json               credential template → copy to config.json
+    ├── config.json                       the router credential (0600, gitignored)
+    ├── router_bootstrap.sh               ONE-TIME, runs ON THE ROUTER
+    ├── DESIGN.md                         this file
+    ├── router_checks_*.sh                read-only diagnostics + their printouts
+    ├── mock_router.py test_*.py run_tests.sh   the offline suite
+    └── xbox.log .state.json              driver-owned log and sample state (gitignored)
 ```
+
+The split exists because kidsout only ever looks for those three names, so
+anything else beside them is noise to it. Keeping the implementation in one
+clearly-named subdirectory makes the device directory legible at a glance and
+leaves the contract surface impossible to mistake. Each contract script is a
+three-line wrapper that `cd`s into `xbox-openwrt-driver/` and execs `xbox.py`;
+the driver anchors every path it owns — `device.json`, `config.json`,
+`.state.json`, `xbox.log` — on its own location, so nothing depends on the
+working directory kidsout happens to use.
+
+**Unless a command says otherwise, run it from `xbox-openwrt-driver/`.**
 
 Two facts shape everything else:
 
@@ -81,7 +97,7 @@ console keeps playing, or reports `down` all afternoon while a game is running.
 
 **If the console is ever stuck offline** — kidsout crashed or was upgraded while
 the Xbox was blocked, `runtimestore.yaml` was reset, someone ran `block` by hand
-— run `./unblock.sh`. It is safe at any time and safe to repeat.
+— run `../unblock.sh`. It is safe at any time and safe to repeat.
 
 Nothing else reconciles the router's state with kidsout's: `unblock.sh` is
 edge-triggered, so the router holds enforcement state that lives outside
@@ -466,17 +482,21 @@ Follow §5. The shipped 200 KB/min is correct for this console on WiFi.
 ### 6. Deploy
 
 kidsout's `DiscoverDevices` scans only the **immediate children** of its devices
-directory — it does not recurse. The driver must therefore sit at
-`devices/xbox/`, not in a subdirectory, and kidsout must be **restarted**
-(discovery runs once, at startup).
+directory — it does not recurse. So the *device* directory must sit at
+`devices/xbox/`, and `getState.sh`, `block.sh` and `unblock.sh` must be
+immediate children of it. `xbox-openwrt-driver/` being a subdirectory is fine:
+kidsout never looks inside it, and the three wrappers reach in from above.
+
+kidsout must be **restarted** — discovery runs once, at startup.
 
 ---
 
 ## 8. The upstream kidsout contract
 
 Upstream (`github.com/zipizap/kidsout`) scans `devices/<name>/` for three
-executable scripts and runs them with `cmd.Dir` unset, so they self-locate with
-`cd "$(dirname "$0")"`.
+executable scripts and runs them with `cmd.Dir` unset, so they self-locate —
+here with `cd "$(dirname "$0")/xbox-openwrt-driver"`, since the driver sits one
+level below the names kidsout calls.
 
 | script | called | must do |
 |---|---|---|
@@ -651,7 +671,7 @@ diagnostic channel. It is size-capped and rotated in place.
 | `getState` always `up` with nobody playing | threshold too low, or a background download | `./xbox.py counters`; re-calibrate (§5) |
 | block "succeeds" but the game continues | flush failed → `block` should now exit non-zero; or you checked the ruleset too early (async reload) | `./xbox.py selftest` for `conntrack`; re-check `nft list chain inet fw4 forward_lan` after a few seconds |
 | block does nothing at all | the rule may not name the MAC the console is currently using | `nft list chain inet fw4 forward_lan` — both MACs must appear in `ether saddr { … }` |
-| console stuck offline | kidsout missed the unblock edge | `./unblock.sh` — safe any time, safe to repeat |
+| console stuck offline | kidsout missed the unblock edge | `../unblock.sh` — safe any time, safe to repeat |
 | `install` exits 1 with `uci.apply` NO_DATA | old build; the apply is redundant here | update; the driver now tolerates it |
 | `selftest` fails "enforcement preconditions" | `conntrack` missing, or the flowtable lost its `counter` flag | `opkg install conntrack`; check `./xbox.py status` facts line |
 | certificate errors after a router upgrade | the router regenerated its cert | `./xbox.py pin` |

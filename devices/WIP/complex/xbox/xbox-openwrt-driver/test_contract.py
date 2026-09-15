@@ -24,24 +24,35 @@ import time
 from mock_router import MockRouter
 from testlib import Suite, device, tmpdir
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+HERE = os.path.dirname(os.path.abspath(__file__))     # the driver subdirectory
+DEVICE_DIR = os.path.dirname(HERE)                    # what kidsout scans
+DRIVER_SUBDIR = os.path.basename(HERE)                # "xbox-openwrt-driver"
 SCRIPTS = ("getState.sh", "block.sh", "unblock.sh")
-PAYLOAD = SCRIPTS + ("allow.sh", "install.sh", "status.sh", "xbox.py")
+DRIVER_FILES = ("allow.sh", "install.sh", "status.sh", "xbox.py")
 
 
 def deploy(tmp, mock):
-    """A copy of the device directory, pointed at the mock."""
+    """A copy of the device directory, pointed at the mock.
+
+    Reproduces the shipped two-level layout rather than flattening it: the
+    three contract scripts at the top, the driver and everything it owns one
+    level down. The split is the thing under test — a contract script that
+    still cd'd to its own directory would find no xbox.py here.
+    """
     d = os.path.join(tmp, "xbox")
-    os.makedirs(d)
-    for name in PAYLOAD:
-        shutil.copy2(os.path.join(HERE, name), os.path.join(d, name))
-    with open(os.path.join(d, "device.json"), "w") as f:
+    drv = os.path.join(d, DRIVER_SUBDIR)
+    os.makedirs(drv)
+    for name in SCRIPTS:
+        shutil.copy2(os.path.join(DEVICE_DIR, name), os.path.join(d, name))
+    for name in DRIVER_FILES:
+        shutil.copy2(os.path.join(HERE, name), os.path.join(drv, name))
+    with open(os.path.join(drv, "device.json"), "w") as f:
         json.dump(device(), f)
-    cfg = os.path.join(d, "config.json")
+    cfg = os.path.join(drv, "config.json")
     with open(cfg, "w") as f:
         json.dump(mock.config(), f)
     os.chmod(cfg, 0o644)                 # deliberately loose: S-02 should fix it
-    return d
+    return d, drv
 
 
 def run(script, cwd, dirname):
@@ -56,7 +67,7 @@ def main():
     s = Suite("upstream script contract")
 
     with tmpdir() as tmp, MockRouter() as mock:
-        d = deploy(tmp, mock)
+        d, drv = deploy(tmp, mock)
 
         with s.case("the three contract scripts exist and are executable") as c:
             for name in SCRIPTS:
@@ -65,7 +76,7 @@ def main():
                 c.check(os.stat(p).st_mode & stat.S_IXUSR, f"{name} has the exec bit")
 
         with s.case("install from an unrelated working directory") as c:
-            p, _ = run("install.sh", "/", d)
+            p, _ = run("install.sh", "/", drv)
             c.eq(p.returncode, 0, f"exit 0 (stderr: {p.stderr.strip()[:200]})")
             c.check("ALLOWED" in p.stdout, "installs in the allowed state")
             secs = mock.state.sections()
@@ -73,7 +84,7 @@ def main():
             c.eq(secs["kidsout_xbox_out"]["enabled"], "0", "console still online")
 
         with s.case("config.json permissions are tightened (S-02)") as c:
-            mode = os.stat(os.path.join(d, "config.json")).st_mode & 0o777
+            mode = os.stat(os.path.join(drv, "config.json")).st_mode & 0o777
             c.eq(oct(mode), oct(0o600), "the credential file is owner-only")
 
         with s.case("getState.sh prints one contract word") as c:
@@ -85,7 +96,7 @@ def main():
 
         with s.case("getState.sh reports 'up' when the console is busy") as c:
             run("getState.sh", "/", d)                    # baseline
-            st = os.path.join(d, ".state.json")
+            st = os.path.join(drv, ".state.json")
             with open(st) as f:
                 data = json.load(f)
             data["counters_ts"] = time.time() - 60
@@ -132,7 +143,7 @@ def main():
             mock.state.fail = None
 
         with s.case("the driver keeps its own log") as c:
-            logf = os.path.join(d, "xbox.log")
+            logf = os.path.join(drv, "xbox.log")
             c.check(os.path.exists(logf), "xbox.log was created")
             body = open(logf).read()
             c.check("state=" in body, "state decisions are recorded")

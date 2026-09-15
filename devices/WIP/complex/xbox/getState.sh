@@ -19,5 +19,8 @@
 # stderr is NOT the diagnostic channel: upstream runs this with Go's
 # cmd.Output(), which discards stderr on success. Detail goes to xbox.log.
 set -uo pipefail
-cd "$(dirname "$0")"
+# Only the three names kidsout calls stay in this directory; the driver and
+# everything it owns live in xbox-openwrt-driver/. Upstream leaves cmd.Dir
+# unset, so self-locate from $0 rather than trusting the working directory.
+cd "$(dirname "$0")/xbox-openwrt-driver"
 exec python3 xbox.py state

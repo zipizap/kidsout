@@ -9,5 +9,8 @@
 # conntrack entries, because OpenWrt accepts established flows before any user
 # rule — without the flush a game already in progress would survive for days.
 set -euo pipefail
-cd "$(dirname "$0")"
+# Only the three names kidsout calls stay in this directory; the driver and
+# everything it owns live in xbox-openwrt-driver/. Upstream leaves cmd.Dir
+# unset, so self-locate from $0 rather than trusting the working directory.
+cd "$(dirname "$0")/xbox-openwrt-driver"
 exec python3 xbox.py block "$@"
