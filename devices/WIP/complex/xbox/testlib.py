@@ -47,6 +47,13 @@ def device(mac="aa:bb:cc:dd:ee:ff", macs=None, ipv4="192.168.2.172", **over):
         d["interfaces"] = [{"mac": mac, "ipv4": ipv4, "link": "?"}]
         d["mac"] = mac
         d["ipv4"] = ipv4
+    # Drop any real router pin: device.json carries the production
+    # certificate fingerprint once ./xbox.py pin has been run, and the mock
+    # serves its own self-signed cert, so an inherited pin would (correctly)
+    # refuse to send credentials and fail every suite.
+    d.setdefault("router", {})
+    d["router"] = dict(d["router"])
+    d["router"]["tls_sha256"] = None
     d.update(over)
     return d
 

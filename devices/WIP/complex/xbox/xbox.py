@@ -79,7 +79,11 @@ ENABLED_WHEN_ALLOWED = "0"
 # errors
 # --------------------------------------------------------------------------- #
 class UbusError(Exception):
-    """The router answered, but refused or failed the request."""
+    """The router answered and refused. `status` is the ubus status code."""
+
+    def __init__(self, message, status=None):
+        super().__init__(message)
+        self.status = status
 
 
 class RouterUnreachable(Exception):
@@ -281,7 +285,7 @@ class Router:
         status = result[0]
         if status != 0:
             raise UbusError(f"ubus status {status} ({UBUS_STATUS.get(status, '?')}) "
-                            f"for {params[1]}.{params[2]}")
+                            f"for {params[1]}.{params[2]}", status=status)
         return result[1] if len(result) > 1 else {}
 
     # ---- endpoint discovery ------------------------------------------- #
@@ -401,7 +405,27 @@ class Router:
         return self.call("uci", "commit", {"config": config})
 
     def uci_apply(self, rollback=False, timeout=30):
-        return self.call("uci", "apply", {"rollback": rollback, "timeout": timeout})
+        """Trigger a service reload for the committed package.
+
+        Tolerates ubus status 5 (NO_DATA), which is what rpcd returns when
+        there is nothing staged to apply. That is the NORMAL case here:
+        `uci commit` already writes the package AND fires
+        rpc_uci_trigger_event() itself, so by the time apply runs the change
+        set is empty. Verified on this router (OpenWrt 24.10.5, rpcd
+        2025.09.01) — this settles REVIEW.1 F-09's open question: the explicit
+        apply after commit is redundant, and treating its NO_DATA as an error
+        made `install` exit 1 despite having done its job correctly.
+
+        It is kept rather than deleted because other rpcd builds do stage
+        changes for apply, and a missed reload is a silent enforcement
+        failure — the expensive direction to be wrong in.
+        """
+        try:
+            return self.call("uci", "apply", {"rollback": rollback, "timeout": timeout})
+        except UbusError as e:
+            if getattr(e, "status", None) == 5 or "no data" in str(e):
+                return {}
+            raise
 
     # ---- the router-side helper ---------------------------------------- #
     def helper(self, verb, *args):
@@ -626,6 +650,28 @@ def live_addresses(fw, device):
     return found, how
 
 
+def routable(addr):
+    """Could traffic from this address reach the internet?
+
+    Link-local (fe80::/10, 169.254/16) and unique-local (fd00::/8) addresses
+    never leave the LAN, so traffic on them is the console talking to something
+    in the house -- not internet use. Counting it would inflate the byte rate
+    with LAN chatter and break a threshold that was calibrated on IPv4 alone.
+    They are still worth FLUSHING, just not worth COUNTING.
+    """
+    a = addr.lower()
+    if a.startswith("fe80:") or a.startswith("169.254."):
+        return False
+    if a.startswith("fd") or a.startswith("fc"):      # ULA, fc00::/7
+        return ":" not in a                            # keep IPv4 that starts 'fd'? never
+    return True
+
+
+def accounting_addresses(fw, device):
+    """Addresses whose bytes count toward the up/down decision."""
+    return [a for a in console_addresses(fw, device) if routable(a)]
+
+
 def console_addresses(fw, device):
     """Every address worth acting on: live ones first, configured ones as backup.
 
@@ -698,10 +744,10 @@ def install_counters(fw, device):
     call on every self-heal; changing the set resets the accumulator, which
     costs exactly one 'unknown' tick.
     """
-    addrs = console_addresses(fw, device)
+    addrs = accounting_addresses(fw, device)
     if not addrs:
-        raise UbusError("no console addresses known (console offline and "
-                        "device.json has no static ipv4)")
+        raise UbusError("no routable console addresses known (console offline "
+                        "and device.json has no static ipv4)")
     return fw.helper_ok("counters-install", *addrs).strip()
 
 
@@ -1024,8 +1070,12 @@ def cmd_status(fw, device, _args):
 
     try:
         info = dict(l.split("=", 1) for l in fw.helper_ok("info").strip().splitlines() if "=" in l)
-        print(f"facts    : firewall={info.get('firewall')} nft_json={info.get('nft_json')} "
-              f"conntrack_tools={info.get('conntrack_tools')} openwrt={info.get('openwrt')}")
+        print(f"facts    : firewall={info.get('firewall')} "
+              f"conntrack_tools={info.get('conntrack_tools')} "
+              f"ct_acct={info.get('ct_acct')} "
+              f"flowtable_counter={info.get('flowtable_counter')} "
+              f"offload_hw={info.get('flowtable_hw')} "
+              f"openwrt={info.get('openwrt')}")
     except Exception as e:
         print(f"facts    : helper unavailable ({e})")
 

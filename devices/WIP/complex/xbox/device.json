@@ -19,7 +19,7 @@
     "ubus_path_candidates": [
       "/ubus"
     ],
-    "tls_sha256": null,
+    "tls_sha256": "65f6d01219966c911ab3a9f46e68f5850ee9b1fe44d085b494f5faece4e6947f",
     "_comment": "ubus_path_candidates was trimmed to the one path that answers: /cgi-bin/luci/rpc/ubus is luci-mod-rpc, a different API, and 404s here. tls_sha256 is set by './xbox.py pin'."
   },
   "state": {
