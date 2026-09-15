@@ -28,11 +28,25 @@ def load_driver(tmp):
     return m
 
 
-def device(mac="aa:bb:cc:dd:ee:ff", **over):
-    """The shipped device.json, with a MAC filled in."""
+def device(mac="aa:bb:cc:dd:ee:ff", macs=None, ipv4="192.168.2.172", **over):
+    """The shipped device.json, with the console's interface(s) filled in.
+
+    `interfaces` is what the driver actually reads, so it must be set here or
+    the fixture would be silently ignored in favour of the shipped file's real
+    MACs. Pass `macs=[...]` to model a console with both a wired and a wireless
+    interface (REVIEW.2 G-02).
+    """
     with open(os.path.join(HERE, "device.json")) as f:
         d = json.load(f)
-    d["mac"] = mac
+    if macs:
+        d["interfaces"] = [{"mac": m, "ipv4": ip, "link": lk}
+                           for m, ip, lk in macs]
+        d["mac"] = macs[0][0]
+        d["ipv4"] = macs[0][1]
+    else:
+        d["interfaces"] = [{"mac": mac, "ipv4": ipv4, "link": "?"}]
+        d["mac"] = mac
+        d["ipv4"] = ipv4
     d.update(over)
     return d
 

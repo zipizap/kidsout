@@ -4,7 +4,7 @@
   "hostname": "xbox.infracon.ovh",
   "ipv4": "192.168.2.172",
   "mac": "d8:e2:df:92:a9:93",
-  "comment": "MAC confirmed on the router 2026-09-11 (DHCP lease, hostname XBOX, Microsoft OUI d8:e2:df). The firewall rule matches on the MAC, so it covers IPv6 and survives the IP changing; the IPv4 is still used for the inbound byte counter and for conntrack flushing. A static DHCP reservation already exists at dhcp.@host[1].",
+  "comment": "The console has TWO interfaces and switches between them whenever the cable is plugged or pulled: ethernet d8:e2:df:92:a9:93 (192.168.2.172, static reservation dhcp.@host[1]) and WiFi d8:e2:df:92:a9:90 (192.168.2.169, DYNAMIC lease - no reservation, so this address can change). Both were confirmed on the router 2026-09-15. The firewall rule names EVERY mac in 'interfaces', because a rule naming only one matches nothing while the console is on the other and the block would silently fail open (REVIEW.2 G-02). Accounting resolves the live address at run time from the lease and neighbour tables rather than trusting 'ipv4' here. The top-level 'mac'/'ipv4' keys are legacy aliases for interfaces[0] and are not used when 'interfaces' is present.",
   "network": {
     "zone": "lan",
     "wan_zone": "wan"
@@ -26,10 +26,22 @@
     "threshold_bytes_per_min": 204800,
     "max_sample_age_s": 300,
     "rule_audit_period_s": 900,
-    "_comment": "'up' means the console's outbound byte rate exceeded threshold_bytes_per_min since the previous sample. Calibrate against the real console with './xbox.py calibrate' \u2014 see F-06.md. A sample older than max_sample_age_s is discarded as stale and reported as 'unknown' rather than averaged over the gap."
+    "_comment": "'up' means the console's outbound byte rate exceeded threshold_bytes_per_min since the previous sample. CALIBRATED 2026-09-15 against the real console: idle 20.8 KB/min, downloading 93.7 KB/min, gaming 289.5 KB/min outbound - so 200 KB/min separates play from download with 3.1x margin. Bytes come from conntrack accounting, accumulated router-side into a monotonic total; nft counters cannot be used because this router offloads flows in hardware and they would never see the traffic (REVIEW.2 G-01/G-04). A sample older than max_sample_age_s is discarded as stale rather than averaged over the gap."
   },
   "rules": {
     "prefix": "kidsout_xbox",
-    "description": "Firewall uci sections named kidsout_xbox* belong to kidsout. block/allow only toggle their 'enabled' option: enabled=1 means the REJECT rule is in force (internet blocked), enabled=0 means it is absent (internet allowed). Nothing else on the router is touched."
-  }
+    "description": "Firewall uci sections named kidsout_xbox* belong to kidsout. block/allow only toggle their 'enabled' option: enabled=1 means the REJECT rule is in force (internet blocked), enabled=0 means it is absent (internet allowed). The single rule lists every console MAC via src_mac, which fw4 parses as a list. Nothing else on the router is touched."
+  },
+  "interfaces": [
+    {
+      "mac": "d8:e2:df:92:a9:93",
+      "ipv4": "192.168.2.172",
+      "link": "ethernet"
+    },
+    {
+      "mac": "d8:e2:df:92:a9:90",
+      "ipv4": "192.168.2.169",
+      "link": "wifi"
+    }
+  ]
 }

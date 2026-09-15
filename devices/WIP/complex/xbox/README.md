@@ -33,7 +33,7 @@ config rule 'kidsout_xbox_out'
         option name    'kidsout xbox: block internet'
         option src     'lan'
         option dest    'wan'
-        option src_mac '<the console's MAC>'
+        option src_mac '<ethernet MAC>' '<wifi MAC>'
         option proto   'all'
         option target  'REJECT'
         option enabled '0'          <-- the toggle
@@ -48,25 +48,35 @@ This is the polarity v1 had backwards. The driver never prints the raw value —
 it prints `internet BLOCKED` / `internet ALLOWED`, because printing `enabled=0`
 is what made the inversion easy to miss.
 
-**Keyed on the MAC, not the IP.** Xbox Live prefers IPv6 wherever the LAN offers
-it, and an IPv4-literal rule does not touch IPv6 traffic — the block would look
-perfectly healthy on the router while the console kept playing. A `src_mac` rule
-covers both families, survives the console's address changing, and removes the
-dependency on a static DHCP reservation.
+**Keyed on the MAC, not the IP** — and on *every* MAC the console has. An
+IPv4-literal rule would not touch IPv6 traffic, and the block would look perfectly
+healthy on the router while the console kept playing.
 
-**Blocking also flushes conntrack.** OpenWrt accepts established/related flows at
-the top of the forward chain, before any user rule. Without a flush, enabling the
-rule stops only *new* connections and a game already in progress survives until
-its conntrack entry expires — up to five days. `block` therefore enables the rule
-*and* drops the console's existing flows, for its IPv4 address and for any IPv6
-address the router's neighbour table knows for that MAC.
+**The console has two MACs**, one for ethernet and one for WiFi, and it switches
+between them whenever the cable is plugged or pulled. A rule naming only one of
+them matches nothing while the console is on the other — the block fails open and
+still reports success. fw4 parses `src_mac` as a list, so the single rule names
+both and does not care which interface is in use today.
+
+**Blocking also flushes conntrack — and that flush is the real mechanism.** This
+router has flow offloading enabled *in hardware*. An established flow is forwarded
+by the MediaTek PPE in silicon and never enters any netfilter hook, so enabling the
+REJECT rule does nothing to a session already in progress. Reloading the firewall
+does not help either: the conntrack entry survives, matches
+`ct state established : accept`, and is immediately re-offloaded. Destroying the
+conntrack entry is the *only* thing that cuts a live session.
+
+So `block` enables the rule **and** flushes the console's flows — and if the flush
+fails it **exits non-zero** rather than reporting a success it did not achieve.
+This needs `conntrack-tools` on the router; `./xbox.py selftest` fails loudly if it
+is missing.
 
 ## How state detection works
 
 `getState.sh` prints one word: `up`, `down` or `unknown`.
 
-The signal is the console's **outbound byte rate**, from an nft counter keyed on
-its MAC, compared against `device.json` → `state.threshold_bytes_per_min`:
+The signal is the console's **outbound byte rate**, compared against
+`device.json` → `state.threshold_bytes_per_min`:
 
 ```
 rate = (xbox_out(now) - xbox_out(prev)) / (now - prev) * 60
@@ -75,10 +85,23 @@ down    rate <= threshold
 unknown the rate is not computable — see below
 ```
 
+**The bytes come from conntrack, not from an nft counter.** An nft counter in the
+forward hook — which is what v2 shipped — cannot see a hardware-offloaded flow, so
+it under-reports gameplay by roughly 98 % and would report `down` all afternoon.
+fw4 declares its flowtable with `counter`, so the hardware's per-flow byte counts
+are fed back into conntrack instead. The helper sums those router-side into a
+**monotonic** total; it has to accumulate rather than sum naively, because
+conntrack entries vanish when a flow expires and a bare sum goes *backwards*
+(measured at −510 KB/min during real gameplay).
+
 Counting *connections* instead (what v1 did) reports Instant-On standby as
 in-use around the clock, which silently burns the whole daily allowance while
-nobody is playing. See [F-06.md](F-06.md), including the calibration procedure
-and the one case bytes cannot separate (a background download looks like use).
+nobody is playing.
+
+The threshold is **calibrated, not guessed** — measured against the real console:
+idle 20.8 KB/min, downloading 93.7 KB/min, gaming 289.5 KB/min outbound. 200 KB/min
+separates play from download with 3.1× margin. This also retires the worry that a
+background download would read as "in use": it does not. See [F-06.md](F-06.md).
 
 `unknown` is reported — and means it — when the router cannot be consulted at
 all, when the login is rejected, when the helper or the counter table is missing,
@@ -136,8 +159,8 @@ $EDITOR config.json          # username: kidsout, password: the one you chose
 Turn the console on and make it talk to the network, then:
 
 ```
-./xbox.py discover --write   # writes device.json.mac
-./xbox.py install            # creates the rule (ALLOWED) and the nft counters
+./xbox.py discover --write   # records EVERY interface into device.json
+./xbox.py install            # creates the rule (ALLOWED) and registers the counters
 ```
 
 `install` leaves the console **online**. Confirm it is still working before
@@ -193,7 +216,7 @@ for every device driver, not just this one.
 ./xbox.py counters    # byte totals and the rate since the last sample
 ./xbox.py calibrate --minutes 30 --label standby
 ./xbox.py selftest    # after any router change
-./xbox.py uninstall   # remove the rule and the counters (destructive)
+./xbox.py uninstall   # remove the rule and the accounting state (destructive)
 ```
 
 `check` asks the router's neighbour table. v1 TCP-connected to ports 53/80/443

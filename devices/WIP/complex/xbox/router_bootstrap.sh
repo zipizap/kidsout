@@ -54,12 +54,24 @@ if [ "${1:-}" = "--uninstall" ]; then
 	done
 	uci commit rpcd
 	/etc/init.d/rpcd restart
-	nft delete table inet kidsout 2>/dev/null
+	nft delete table inet kidsout 2>/dev/null   # pre-v3 accounting table, if present
+	rm -f /tmp/kidsout-xbox.acct /tmp/kidsout-xbox.addrs
+	# Edit in place via a mode-preserving copy. The obvious
+	# `grep -v ... > tmp && mv tmp "$f"` gives the replacement file the
+	# shell's umask, which would drop /etc/shadow from 0600 to 0644 and
+	# expose every account's hash (REVIEW.2 S2-01).
 	for f in /etc/passwd /etc/group /etc/shadow; do
 		[ -f "$f" ] || continue
-		grep -v "^${RPCD_USER}:" "$f" > "$f.kidsout.tmp" && mv "$f.kidsout.tmp" "$f"
+		cp -p "$f" "$f.kidsout.bak" || continue
+		if grep -v "^${RPCD_USER}:" "$f.kidsout.bak" > "$f"; then
+			rm -f "$f.kidsout.bak"
+		else
+			cat "$f.kidsout.bak" > "$f"; rm -f "$f.kidsout.bak"
+		fi
 	done
-	say "done. helper, ACL, rpcd login, nft table and the '$RPCD_USER' user removed."
+	say "done. helper, ACL, rpcd login, accounting state and the '$RPCD_USER' user removed."
+	say "file modes after edit (shadow must be 600):"
+	ls -l /etc/shadow 2>/dev/null | sed 's/^/    /' 
 	exit 0
 fi
 
@@ -73,18 +85,27 @@ cat > "$HELPER" <<'HELPER_EOF'
 # kidsout xbox privileged helper. Invoked by rpcd `file exec` with a fixed
 # verb and validated arguments; never with a shell, so argv is not parsed.
 #
-#   info                      router facts: fw3/fw4, nft json, conntrack tools
-#   counters                  read the kidsout byte counters (json if available)
-#   counters-install MAC IP4  create/refresh the accounting table (idempotent)
-#   counters-remove           drop the accounting table
-#   flush ADDR [ADDR...]      drop conntrack entries for the given addresses
-#   neigh                     ipv4 + ipv6 neighbour table
-#   leases                    /tmp/dhcp.leases
-#   conntrack-dump            /proc/net/nf_conntrack (diagnostics only)
+#   info                       router facts: fw3/fw4, offload, conntrack tools
+#   counters                   monotonic byte totals for the console
+#   counters-install ADDR...   register the console's addresses, reset totals
+#   counters-remove            forget the console; drop accumulator state
+#   flush ADDR [ADDR...]       drop conntrack entries for the given addresses
+#   neigh                      ipv4 + ipv6 neighbour table
+#   leases                     /tmp/dhcp.leases
+#
+# WHY CONNTRACK AND NOT AN NFT COUNTER (REVIEW.2 G-01)
+# This router runs fw4 with flow_offloading_hw=1 on a MediaTek PPE. Offloaded
+# flows are forwarded in silicon and never enter ANY netfilter hook, so an nft
+# counter in the forward hook (or at netdev ingress) sees only each flow's
+# first few packets and under-reports gameplay by ~98%. fw4 declares its
+# flowtable with `counter`, so the hardware's per-flow MIB is fed back into
+# conntrack instead -- verified on this SoC: 9 of 9 offloaded flows gained
+# bytes over 20s. Conntrack is therefore a byte source offload cannot blind,
+# and it needs no nft table, no device names and no extra package.
 set -u
 
-TABLE=kidsout
-CHAIN=accounting
+STATE=/tmp/kidsout-xbox.acct     # tmpfs: no flash wear, cleared on reboot
+ADDRS=/tmp/kidsout-xbox.addrs
 
 valid_mac() {
 	case "$1" in
@@ -93,8 +114,9 @@ valid_mac() {
 	esac
 }
 
-# addresses may contain only hex digits, dots, colons and a /prefix — enough
-# for v4 and v6, and nothing that could be mistaken for an option or a path.
+# Addresses may contain only hex digits, dots and colons -- enough for v4 and
+# v6, and nothing that could be mistaken for an option or a path. Note this
+# deliberately rejects a /prefix: no caller passes a CIDR (REVIEW.2 G-13).
 valid_addr() {
 	case "$1" in
 	"" | -*) return 1 ;;
@@ -112,59 +134,119 @@ shift
 case "$verb" in
 info)
 	if have fw4; then echo "firewall=fw4"; elif have fw3; then echo "firewall=fw3"; else echo "firewall=unknown"; fi
-	if have nft; then
-		echo "nft=yes"
-		if nft -j list counters >/dev/null 2>&1; then echo "nft_json=yes"; else echo "nft_json=no"; fi
-	else
-		echo "nft=no"
-		echo "nft_json=no"
-	fi
+	if have nft; then echo "nft=yes"; else echo "nft=no"; fi
 	if have conntrack; then echo "conntrack_tools=yes"; else echo "conntrack_tools=no"; fi
 	[ -r /proc/net/nf_conntrack ] && echo "proc_nf_conntrack=yes" || echo "proc_nf_conntrack=no"
-	if nft list table inet "$TABLE" >/dev/null 2>&1; then echo "counters_table=yes"; else echo "counters_table=no"; fi
+	echo "ct_acct=$(cat /proc/sys/net/netfilter/nf_conntrack_acct 2>/dev/null || echo unknown)"
+	# The three facts the accounting design depends on. If a firmware upgrade
+	# ever changes them, this is what makes it visible in xbox.log rather than
+	# showing up as a silent permanent 'down' (REVIEW.2 Q4).
+	if nft list flowtable inet fw4 ft 2>/dev/null | grep -q "counter"; then
+		echo "flowtable_counter=yes"
+	elif nft list flowtables 2>/dev/null | grep -q flowtable; then
+		echo "flowtable_counter=NO"
+	else
+		echo "flowtable_counter=none"
+	fi
+	if nft list flowtable inet fw4 ft 2>/dev/null | grep -q "flags offload"; then
+		echo "flowtable_hw=yes"
+	else
+		echo "flowtable_hw=no"
+	fi
+	echo "registered_addrs=$(cat "$ADDRS" 2>/dev/null | tr '\n' ' ')"
 	echo "openwrt=$(. /etc/openwrt_release 2>/dev/null; echo "${DISTRIB_RELEASE:-unknown}")"
 	echo "ipv6_wan=$(ip -6 route show default 2>/dev/null | head -n1 | wc -l)"
 	;;
 
 counters)
-	have nft || { echo "nft not available" >&2; exit 3; }
-	nft list table inet "$TABLE" >/dev/null 2>&1 || { echo "counters table missing" >&2; exit 4; }
-	if nft -j list counters table inet "$TABLE" 2>/dev/null; then
-		:
-	else
-		nft list counters table inet "$TABLE"
-	fi
+	[ -r /proc/net/nf_conntrack ] || { echo "/proc/net/nf_conntrack unreadable" >&2; exit 3; }
+	[ -s "$ADDRS" ] || { echo "no addresses registered" >&2; exit 4; }
+
+	# Fold the live conntrack table into a monotonic accumulator.
+	#
+	# A sum over live flows is NOT a counter: entries vanish when a flow
+	# expires and take their bytes with them, so a naive sum goes DOWN.
+	# Measured during real gameplay it produced -510 KB/min (REVIEW.2 G-04).
+	# So: for each flow still present, add only what it gained since we last
+	# looked; for a flow we have not seen before, add all of it; a flow that
+	# disappeared simply stops contributing. The running total never
+	# decreases, which is exactly what the driver's sample_rate() expects.
+	awk -v addrfile="$ADDRS" -v statefile="$STATE" '
+	BEGIN {
+		while ((getline a < addrfile) > 0) if (a != "") addr[a] = 1
+		close(addrfile)
+		tot_out = 0; tot_in = 0
+		while ((getline line < statefile) > 0) {
+			n = split(line, f, " ")
+			if (f[1] == "#total" && n >= 3) { tot_out = f[2] + 0; tot_in = f[3] + 0 }
+			else if (n >= 3) { po[f[1]] = f[2] + 0; pi[f[1]] = f[3] + 0 }
+		}
+		close(statefile)
+	}
+	{
+		# Does this entry belong to the console? Match the ORIGINAL tuple
+		# only, and anchored on src=/dst=, so 192.168.2.17 cannot match
+		# 192.168.2.172 and a remote host NATed toward us is not counted.
+		osrc = ""; odst = ""; osp = ""; odp = ""
+		dir = 0; o = 0; i2 = 0
+		for (k = 1; k <= NF; k++) {
+			if ($k ~ /^src=/) {
+				split($k, a, "="); if (osrc == "") osrc = a[2]
+				dir = (a[2] in addr) ? 1 : 2
+			}
+			else if ($k ~ /^dst=/)   { split($k, a, "="); if (odst == "") odst = a[2] }
+			else if ($k ~ /^sport=/) { split($k, a, "="); if (osp  == "") osp  = a[2] }
+			else if ($k ~ /^dport=/) { split($k, a, "="); if (odp  == "") odp  = a[2] }
+			else if ($k ~ /^bytes=/) {
+				split($k, a, "=")
+				if (dir == 1) o += a[2]; else i2 += a[2]
+			}
+		}
+		if (!(osrc in addr) && !(odst in addr)) next
+
+		key = $3 "|" osrc ":" osp ">" odst ":" odp
+		if (key in po) {
+			d = o - po[key];  if (d > 0) tot_out += d
+			e = i2 - pi[key]; if (e > 0) tot_in  += e
+		} else {
+			tot_out += o; tot_in += i2
+		}
+		co[key] = o; ci[key] = i2; seen[key] = 1
+	}
+	END {
+		tmp = statefile ".tmp"
+		printf "#total %d %d\n", tot_out, tot_in > tmp
+		for (k in seen) printf "%s %d %d\n", k, co[k], ci[k] >> tmp
+		close(tmp)
+		system("mv " tmp " " statefile)
+		printf "xbox_out %d\n", tot_out
+		printf "xbox_in %d\n",  tot_in
+		print  "source conntrack"
+	}' /proc/net/nf_conntrack
 	;;
 
 counters-install)
-	have nft || { echo "nft not available" >&2; exit 3; }
-	mac="${1:-}"; ip4="${2:-}"
-	valid_mac "$mac" || { echo "bad mac" >&2; exit 2; }
-	valid_addr "$ip4" || { echo "bad ipv4" >&2; exit 2; }
-	# Rebuild only when the live ruleset does not already match this device,
-	# so that a no-op install does not reset the counters.
-	if nft list chain inet "$TABLE" "$CHAIN" 2>/dev/null | grep -qi "$mac" &&
-		nft list chain inet "$TABLE" "$CHAIN" 2>/dev/null | grep -q "$ip4"; then
+	[ $# -gt 0 ] || { echo "counters-install needs at least one address" >&2; exit 2; }
+	for a in "$@"; do
+		valid_addr "$a" || { echo "bad address: $a" >&2; exit 2; }
+	done
+	# Idempotent: if the same address set is already registered, keep the
+	# accumulator so a no-op install does not force an 'unknown' tick.
+	new=$(for a in "$@"; do echo "$a"; done | sort -u)
+	old=$(sort -u "$ADDRS" 2>/dev/null)
+	if [ "$new" = "$old" ]; then
+		# Same address set: leave the accumulator alone so a re-install does
+		# not cost the driver an 'unknown' tick.
 		echo "unchanged"
 		exit 0
 	fi
-	nft delete table inet "$TABLE" 2>/dev/null
-	nft add table inet "$TABLE" || exit 5
-	nft add counter inet "$TABLE" xbox_out || exit 5
-	nft add counter inet "$TABLE" xbox_in || exit 5
-	nft add chain inet "$TABLE" "$CHAIN" '{ type filter hook forward priority -160; policy accept; }' || exit 5
-	# outbound is matched on the MAC: covers IPv4 and IPv6 alike, and survives
-	# the console's address changing. inbound can only be matched on the IP
-	# (the L2 destination in the forward hook is the router, not the console),
-	# so it is IPv4-only and used for diagnostics, not for the up/down call.
-	nft add rule inet "$TABLE" "$CHAIN" ether saddr "$mac" counter name xbox_out || exit 5
-	nft add rule inet "$TABLE" "$CHAIN" ip daddr "$ip4" counter name xbox_in || exit 5
+	echo "$new" > "$ADDRS" || exit 5
+	rm -f "$STATE"
 	echo "installed"
 	;;
 
 counters-remove)
-	have nft || exit 3
-	nft delete table inet "$TABLE" 2>/dev/null
+	rm -f "$STATE" "$ADDRS"
 	echo "removed"
 	;;
 
@@ -177,7 +259,9 @@ flush)
 		conntrack -D -s "$a" >/dev/null 2>&1 && n=$((n + 1))
 		conntrack -D -d "$a" >/dev/null 2>&1 && n=$((n + 1))
 	done
-	echo "flushed $*"
+	# Report how many directions actually matched, so the driver can tell
+	# "flushed a live session" from "there was nothing to flush".
+	echo "flushed $n entr$([ "$n" = 1 ] && echo y || echo ies) for $*"
 	;;
 
 neigh)
@@ -187,10 +271,6 @@ neigh)
 
 leases)
 	cat /tmp/dhcp.leases 2>/dev/null
-	;;
-
-conntrack-dump)
-	cat /proc/net/nf_conntrack 2>/dev/null
 	;;
 
 *)

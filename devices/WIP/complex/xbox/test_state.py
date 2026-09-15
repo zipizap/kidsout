@@ -39,6 +39,11 @@ def backdate(m, seconds):
     m.save_state(st)
 
 
+def fresh_state():
+    """An empty driver state dict — no baseline, no cached endpoint."""
+    return {}
+
+
 def state_word(m, fw, dev):
     with captured() as buf:
         rc = m.cmd_state(fw, dev, None)
@@ -177,6 +182,60 @@ def main():
             c.check("audit:" in logged, "an audit line was written")
             c.check("internet BLOCKED" in logged,
                     "recording what the router is actually enforcing")
+
+        # ---- REVIEW.2 G-04: monotonicity is a guarantee, not an assumption - #
+        with s.case("counters going backwards -> unknown, then re-baseline (G-04)") as c:
+            # The helper accumulates router-side precisely so this cannot
+            # happen: a naive conntrack sum DOES go backwards when flows expire
+            # (measured at -510 KB/min during real gameplay). If the guarantee
+            # is ever violated the driver must say 'unknown', not compute a
+            # negative rate and call it 'down'.
+            st = fresh_state()
+            mock.state.reset_counters()
+            mock.state.counters_installed = True
+            mock.state.counter_addrs = ["192.168.2.172"]
+            mock.state.add_traffic(out=5_000_000)
+            with captured():
+                m.sample_rate(fw(), dev, st, now=1000.0)      # baseline
+            mock.state.reset_counters()                        # totals collapse
+            mock.state.add_traffic(out=1_000)
+            rate_out, _rin, reason = m.sample_rate(fw(), dev, st, now=1060.0)
+            c.check(rate_out is None, "no rate computed from a decrease")
+            c.check(reason is not None and "decreas" in reason.lower(),
+                    f"reason names the decrease: {reason!r}")
+            # and the very next tick works again off the new baseline
+            mock.state.add_traffic(out=4_000_000)
+            rate2, _i, reason2 = m.sample_rate(fw(), dev, st, now=1120.0)
+            c.check(reason2 is None, f"re-baselined cleanly: {reason2!r}")
+            c.check(rate2 is not None and rate2 > 0, f"positive rate again: {rate2}")
+
+        with s.case("the v3 key/value counters shape is parsed (G-01)") as c:
+            mock.state.counters_installed = True
+            mock.state.counter_addrs = ["192.168.2.172"]
+            mock.state.reset_counters()
+            mock.state.add_traffic(out=12345, inbound=678)
+            vals = m.read_counters(fw())
+            c.check(vals.get("xbox_out") == 12345, f"xbox_out parsed: {vals}")
+            c.check(vals.get("xbox_in") == 678, f"xbox_in parsed: {vals}")
+
+        with s.case("a download does not read as gameplay (calibrated)") as c:
+            # Measured on the real console: a 12 MB/min download produced only
+            # 93.7 KB/min OUTBOUND, while gameplay produced 289.5 KB/min. The
+            # threshold sits between them, so heavy downloading must read down.
+            st = fresh_state()
+            mock.state.reset_counters()
+            mock.state.counters_installed = True
+            mock.state.counter_addrs = ["192.168.2.172"]
+            with captured():
+                m.sample_rate(fw(), dev, st, now=2000.0)
+            mock.state.add_traffic(out=int(93.7 * 1024), inbound=12 * 1024 * 1024)
+            rate_out, rate_in, reason = m.sample_rate(fw(), dev, st, now=2060.0)
+            c.check(reason is None, f"rate computed: {reason!r}")
+            thr = dev["state"]["threshold_bytes_per_min"]
+            c.check(rate_out < thr,
+                    f"download outbound {rate_out/1024:.1f} KB/min stays under "
+                    f"{thr/1024:.0f} KB/min")
+            c.check(rate_in > thr * 10, "…even though inbound is enormous")
 
     return s.report()
 

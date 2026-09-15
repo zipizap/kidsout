@@ -430,12 +430,53 @@ UBUS_STATUS = {
 # --------------------------------------------------------------------------- #
 # firewall rules
 # --------------------------------------------------------------------------- #
+MAC_RE = re.compile(r"(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}")
+
+
+def interfaces(device):
+    """Every interface the console can appear on, as [{'mac','ipv4','link'}].
+
+    A console has a SEPARATE MAC for wired and wireless, and switches between
+    them whenever the cable is plugged or pulled. v2 recorded only whichever
+    one happened to be live when `discover` ran, which meant the block could
+    be keyed on an interface the console was not using -- matching nothing,
+    while still reporting success (REVIEW.2 G-02). Both must be covered.
+
+    Falls back to the legacy scalar mac/ipv4 keys so an old device.json still
+    works, and so does the offline suite.
+    """
+    out = []
+    for e in device.get("interfaces") or []:
+        mac = (e.get("mac") or "").strip().lower()
+        if MAC_RE.fullmatch(mac):
+            out.append({"mac": mac,
+                        "ipv4": (e.get("ipv4") or "").strip(),
+                        "link": e.get("link") or "?"})
+    if not out:
+        mac = (device.get("mac") or "").strip().lower()
+        if MAC_RE.fullmatch(mac):
+            out.append({"mac": mac, "ipv4": (device.get("ipv4") or "").strip(),
+                        "link": "?"})
+    return out
+
+
+def require_macs(device):
+    """Every configured MAC, lowercased. Exits if none is usable."""
+    macs = [e["mac"] for e in interfaces(device)]
+    if not macs:
+        sys.exit("device.json lists no valid interface MAC. Turn the console on "
+                 "and run:\n    ./xbox.py discover --write")
+    return macs
+
+
 def require_mac(device):
-    mac = (device.get("mac") or "").strip()
-    if not mac or not re.fullmatch(r"(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}", mac):
-        sys.exit("device.json has no valid 'mac'. Turn the console on and run:\n"
-                 "    ./xbox.py discover --write")
-    return mac.lower()
+    """The primary MAC. Kept for callers that genuinely want just one."""
+    return require_macs(device)[0]
+
+
+def static_addresses(device):
+    """Configured IPv4s, in device.json order. May be stale -- see live_addresses."""
+    return [e["ipv4"] for e in interfaces(device) if e.get("ipv4")]
 
 
 def get_xbox_rules(device):
@@ -445,14 +486,20 @@ def get_xbox_rules(device):
     DHCP change cannot silently disarm the block. v1's `_fwd_in` added nothing
     (a console that cannot send is not reachable either) and its `_input_out`
     was a forward rule despite its name and a strict subset of this one (F-08).
+
+    ALL of the console's MACs go on the one rule. fw4 parses src_mac as a list
+    (fw4.uc:2314, PARSE_LIST), so wired and wireless are covered by a single
+    section and the block does not care which one the console is using today
+    (REVIEW.2 G-02).
     """
     p = device["rules"]["prefix"]
+    macs = require_macs(device)
     return [
         (f"{p}_out", {
             "name": "kidsout xbox: block internet",
             "src": device["network"]["zone"],
             "dest": device["network"].get("wan_zone", "wan"),
-            "src_mac": require_mac(device),
+            "src_mac": macs if len(macs) > 1 else macs[0],
             "proto": "all",
             "target": "REJECT",
             "enabled": ENABLED_WHEN_ALLOWED,
@@ -536,46 +583,105 @@ def _set_enabled(fw, device, value):
     return True
 
 
-def console_addresses(fw, device):
-    """The console's IPv4 plus any IPv6 addresses the router knows for its MAC."""
-    addrs = [device["ipv4"]]
-    mac = (device.get("mac") or "").lower()
-    if not mac:
-        return addrs
+def live_addresses(fw, device):
+    """Addresses the router currently associates with any of the console's MACs.
+
+    Resolved at run time from the DHCP lease file and the neighbour table
+    rather than trusting device.json's static IPv4, because only one of the
+    console's two interfaces is up at a time and the other one's address is
+    stale by definition. The WiFi interface also has no static reservation, so
+    its address can change at any renewal (REVIEW.2 G-02, G-06).
+
+    Returns (addresses, links) where links maps address -> how we found it.
+    """
+    macs = {e["mac"] for e in interfaces(device)}
+    found, how = [], {}
+
+    def note(addr, src):
+        if addr and addr not in found:
+            found.append(addr)
+            how[addr] = src
+
+    try:
+        for line in fw.helper_ok("leases").splitlines():
+            f = line.split()
+            # <expiry> <mac> <ip> <hostname> <clientid>
+            if len(f) >= 3 and f[1].lower() in macs:
+                note(f[2], "lease")
+    except Exception as e:
+        log(f"warn: lease lookup failed: {e}")
+
     try:
         for line in fw.helper_ok("neigh").splitlines():
             f = line.split()
-            if len(f) >= 5 and mac in line.lower() and f[0] not in addrs:
-                addrs.append(f[0])
+            # <addr> dev <dev> lladdr <mac> <state>
+            if not f:
+                continue
+            low = line.lower()
+            if any(m in low for m in macs) and "failed" not in low:
+                note(f[0], "neigh")
     except Exception as e:
         log(f"warn: neighbour lookup failed: {e}")
+
+    return found, how
+
+
+def console_addresses(fw, device):
+    """Every address worth acting on: live ones first, configured ones as backup.
+
+    The static entries are kept as a fallback so a block still targets
+    something sensible when the router's tables are momentarily empty -- an
+    extra address costs nothing, whereas missing the live one costs the block.
+    """
+    addrs, _how = live_addresses(fw, device)
+    for a in static_addresses(device):
+        if a and a not in addrs:
+            addrs.append(a)
     return addrs
 
 
 def flush_conntrack(fw, device):
     """Drop the console's existing flows so a block bites immediately.
 
-    OpenWrt accepts established/related flows before any user rule, so without
-    this an in-progress game survives the block until its conntrack entry
-    expires — up to five days (REVIEW.1 F-05).
+    Returns (ok, detail). This is NOT an optimisation: with flow offloading
+    enabled -- and this router offloads in hardware -- an established flow is
+    forwarded by the PPE without entering any netfilter hook, so the REJECT
+    rule never applies to it at all. Reloading the firewall does not help
+    either: the conntrack entry survives, matches `ct state established
+    : accept`, and is immediately re-offloaded. Destroying the conntrack entry
+    is the ONLY thing that cuts a session already in progress (REVIEW.2 G-03).
+
+    Once the flush lands the console cannot re-offload while blocked: `flow add
+    @ft` only acts on established, bidirectionally-seen flows, and new SYNs are
+    REJECTed before they get there. One successful flush is enough.
     """
     addrs = console_addresses(fw, device)
+    if not addrs:
+        return False, "no console addresses known — nothing could be flushed"
     try:
-        fw.helper_ok("flush", *addrs)
-        log(f"conntrack flushed for {addrs}")
-        return f"flushed {' '.join(addrs)}"
+        detail = fw.helper_ok("flush", *addrs).strip()
+        log(f"conntrack flushed for {addrs}: {detail}")
+        return True, detail or f"flushed {' '.join(addrs)}"
     except UbusError as e:
-        log(f"warn: conntrack flush failed: {e}")
-        return (f"NOT flushed ({e}). Install conntrack-tools on the router "
-                f"('opkg install conntrack-tools' or 'apk add conntrack-tools'), "
-                f"otherwise a game already in progress survives the block.")
+        log(f"ERROR: conntrack flush failed: {e}")
+        return False, (f"NOT flushed ({e}). Install conntrack-tools on the router "
+                       f"('opkg install conntrack-tools' or 'apk add conntrack-tools'), "
+                       f"otherwise a session already in progress survives the block.")
 
 
 def cmd_block(fw, device, _args):
     _set_enabled(fw, device, ENABLED_WHEN_BLOCKED)
     # Always flush, even when the rule was already enabled: re-asserting the
     # block is exactly when a lingering flow needs killing.
-    print("conntrack:", flush_conntrack(fw, device))
+    ok, detail = flush_conntrack(fw, device)
+    print("conntrack:", detail)
+    if not ok:
+        # Exiting 0 here would tell kidsout the console was blocked while it
+        # carried on playing. block.sh is re-run every tick while blocked and
+        # up, so a non-zero exit costs one log line a minute and stops as soon
+        # as the flush succeeds -- far better than a silent lie (REVIEW.2 G-03).
+        log("block: FLUSH FAILED — an in-progress session may still be running")
+        return 1
 
 
 def cmd_allow(fw, device, _args):
@@ -586,22 +692,60 @@ def cmd_allow(fw, device, _args):
 # traffic counters  (the state signal)
 # --------------------------------------------------------------------------- #
 def install_counters(fw, device):
-    return fw.helper_ok("counters-install", require_mac(device), device["ipv4"]).strip()
+    """Register the console's current addresses with the accounting helper.
+
+    Re-registering the same set is a no-op on the router, so this is cheap to
+    call on every self-heal; changing the set resets the accumulator, which
+    costs exactly one 'unknown' tick.
+    """
+    addrs = console_addresses(fw, device)
+    if not addrs:
+        raise UbusError("no console addresses known (console offline and "
+                        "device.json has no static ipv4)")
+    return fw.helper_ok("counters-install", *addrs).strip()
+
+
+def helper_facts(fw):
+    """The helper's `info` verb as a dict. Cheap, read-only."""
+    facts = {}
+    for line in fw.helper_ok("info").splitlines():
+        if "=" in line:
+            k, _, v = line.partition("=")
+            facts[k.strip()] = v.strip()
+    return facts
 
 
 def read_counters(fw):
-    """Return {'xbox_out': bytes, 'xbox_in': bytes}.
+    """Return {'xbox_out': bytes, 'xbox_in': bytes} as MONOTONIC totals.
 
-    Raises UbusError with code 4 semantics if the table is missing, so callers
-    can self-heal; raises RouterUnreachable if the router could not be asked.
+    The helper accumulates router-side and guarantees the totals never
+    decrease, which is what sample_rate() assumes. That guarantee is the whole
+    reason the accumulation happens on the router: the underlying conntrack
+    byte counters are per-flow and vanish when a flow expires, so a naive sum
+    goes DOWN -- measured at -510 KB/min during active gameplay (REVIEW.2
+    G-04). Do not reintroduce a bare sum here.
+
+    Raises CountersMissing (helper exit 4) when the console's addresses are not
+    registered, so callers can self-heal; RouterUnreachable if the router could
+    not be asked at all.
     """
     code, out, err = fw.helper("counters")
     if code == 4:
-        raise CountersMissing(err.strip() or "counters table missing")
+        raise CountersMissing(err.strip() or "no addresses registered")
     if code != 0:
         raise UbusError(f"helper counters failed (code {code}): {err.strip() or out.strip()}")
 
     vals = {}
+    # v3 shape: "xbox_out <n>" / "xbox_in <n>" / "source <name>", one per line.
+    for line in out.splitlines():
+        f = line.split()
+        if len(f) == 2 and f[0] in ("xbox_out", "xbox_in") and f[1].isdigit():
+            vals[f[0]] = int(f[1])
+    if vals:
+        return vals
+
+    # Pre-v3 nft shapes, kept so a router still running the old helper does not
+    # hard-fail: json first, then the plain-text counter block.
     try:
         doc = json.loads(out)
         for item in doc.get("nftables", []):
@@ -609,7 +753,6 @@ def read_counters(fw):
             if c and "name" in c:
                 vals[c["name"]] = int(c.get("bytes", 0))
     except (json.JSONDecodeError, ValueError, AttributeError):
-        # plain-text fallback for images without nft json support
         for m in re.finditer(r"counter\s+(\S+)\s*\{[^}]*?bytes\s+(\d+)", out, re.S):
             vals[m.group(1)] = int(m.group(2))
     if not vals:
@@ -618,7 +761,7 @@ def read_counters(fw):
 
 
 class CountersMissing(UbusError):
-    """The nft accounting table is not present on the router."""
+    """The console's addresses are not registered with the helper."""
 
 
 def sample_rate(fw, device, state, now=None):
@@ -816,6 +959,36 @@ def cmd_selftest(fw, device, _args):
 
     check("write access to uci firewall (dry run)", lambda: _write_probe(fw))
 
+    def enforcement_preconditions():
+        """The two ways a block can look fine and do nothing."""
+        facts = helper_facts(fw)
+        problems = []
+        if facts.get("conntrack_tools") != "yes":
+            problems.append(
+                "conntrack-tools is NOT installed. With flow offloading on, an "
+                "in-progress session is forwarded in hardware and never reaches "
+                "the REJECT rule, so flushing its conntrack entry is the only "
+                "way to cut it. Fix: opkg update && opkg install conntrack-tools")
+        if facts.get("flowtable_counter") == "NO":
+            problems.append(
+                "the fw4 flowtable has no 'counter' flag, so offloaded flows do "
+                "not update conntrack byte counters and the state metric will "
+                "under-report badly. Fix: disable flow offloading, or upgrade fw4")
+        if problems:
+            raise UbusError(" | ".join(problems))
+        return (f"conntrack-tools present; flowtable counter="
+                f"{facts.get('flowtable_counter')}, hw={facts.get('flowtable_hw')}")
+    check("enforcement preconditions", enforcement_preconditions)
+
+    def console_visible():
+        addrs, how = live_addresses(fw, device)
+        cfg_macs = require_macs(device)
+        if not addrs:
+            raise UbusError(f"none of {len(cfg_macs)} configured MAC(s) is visible "
+                            f"on the router — is the console on?")
+        return f"{', '.join(addrs)} ({len(cfg_macs)} MAC(s) configured)"
+    check("console is visible on the LAN", console_visible)
+
     failed = [r for r in results if not r[0]]
     print()
     if failed:
@@ -920,35 +1093,86 @@ def cmd_check(fw, device, _args):
 
 
 def cmd_discover(fw, device, args):
-    ip = device["ipv4"]
-    found = None
-    for line in fw.helper_ok("leases").splitlines():
+    """Find every interface the console has, by hostname and by known MAC.
+
+    A console shows up under one MAC on ethernet and another on WiFi, usually
+    differing only in the last octet. v2 recorded whichever was live and
+    silently ignored the other (REVIEW.2 G-02), so this looks for all of them:
+    any lease whose hostname looks like the console, plus anything already in
+    device.json, plus anything sharing the same OUI and near-identical MAC.
+    """
+    known = {e["mac"]: dict(e) for e in interfaces(device)}
+    found = {}
+
+    leases = []
+    try:
+        leases = fw.helper_ok("leases").splitlines()
+    except Exception as e:
+        print(f"lease lookup failed: {e}")
+
+    hostname_hint = (device.get("id") or "xbox").lower()
+    for line in leases:
         f = line.split()
-        if len(f) >= 4 and f[2] == ip:
-            found = f[1].lower()
-            print(f"dhcp lease: ip={ip} mac={found} hostname={f[3]}")
+        if len(f) < 4:
+            continue
+        mac, ip, host = f[1].lower(), f[2], f[3]
+        if not MAC_RE.fullmatch(mac):
+            continue
+        same_oui = any(m[:8] == mac[:8] for m in known)
+        if hostname_hint in host.lower() or mac in known or same_oui:
+            found[mac] = {"mac": mac, "ipv4": ip, "link": "?", "hostname": host}
+
+    # Which of them is up right now, and on what
+    live, how = live_addresses(fw, device)
+    try:
+        for line in fw.helper_ok("neigh").splitlines():
+            low = line.lower()
+            for mac in list(found):
+                if mac in low and "failed" not in low:
+                    found[mac]["link"] = "up"
+    except Exception:
+        pass
+
     if not found:
-        print(f"dhcp lease: none for {ip} right now")
-    for line in fw.helper_ok("neigh").splitlines():
-        f = line.split()
-        if f and f[0] == ip and "lladdr" in line:
-            found = found or f[f.index("lladdr") + 1].lower()
-            print(f"neighbour : {line.strip()}")
-    if not found:
-        print("\ncould not determine the MAC. Turn the console on, make it talk to the\n"
-              "network (open a game or the store), and run this again.")
+        print("no console interfaces found. Turn the console on, make it talk to "
+              "the network, and try again.")
         return 1
-    print(f"\nmac: {found}")
-    if args.write:
-        dev = load_json(DEVICE_FILE)
-        dev["mac"] = found
-        dev.pop("comment", None)
-        with open(DEVICE_FILE, "w") as f:
-            json.dump(dev, f, indent=2)
-            f.write("\n")
-        print("written to device.json. Now run './xbox.py install'.")
-    else:
-        print("re-run with --write to record it in device.json.")
+
+    print("interfaces found:")
+    for mac, e in sorted(found.items()):
+        mark = "  <- live" if e.get("link") == "up" else ""
+        print(f"  {mac}  {e['ipv4']:<15} {e.get('hostname','')}{mark}")
+    if live:
+        print(f"currently reachable: {', '.join(live)}")
+
+    if not args.write:
+        print("\nre-run with --write to record these in device.json")
+        return 0
+
+    dev = load_json(DEVICE_FILE)
+    merged = dict(known)
+    for mac, e in found.items():
+        merged.setdefault(mac, {})
+        merged[mac].update({"mac": mac, "ipv4": e["ipv4"]})
+        merged[mac].setdefault("link", "?")
+    dev["interfaces"] = [
+        {"mac": m, "ipv4": v.get("ipv4", ""), "link": v.get("link", "?")}
+        for m, v in sorted(merged.items())
+    ]
+    # Keep the legacy scalars pointing at the first interface, and PRESERVE the
+    # provenance comment instead of dropping it (REVIEW.2 G-12).
+    if dev["interfaces"]:
+        dev["mac"] = dev["interfaces"][0]["mac"]
+        dev["ipv4"] = dev["interfaces"][0]["ipv4"] or dev.get("ipv4", "")
+    dev["comment"] = (f"interfaces discovered {time.strftime('%Y-%m-%d')}: "
+                      + "; ".join(f"{e['mac']}={e['ipv4']}" for e in dev["interfaces"])
+                      + ". The firewall rule names every MAC, so the block holds "
+                        "whether the console is on ethernet or WiFi. "
+                      + (dev.get("comment", "") or ""))[:1200]
+    with open(DEVICE_FILE, "w") as fh:
+        json.dump(dev, fh, indent=2)
+        fh.write("\n")
+    print(f"\nwrote {len(dev['interfaces'])} interface(s) to {DEVICE_FILE}")
     return 0
 
 
@@ -1045,8 +1269,11 @@ def main():
     # The state path gets its own, much tighter budget than the interactive
     # commands, and a hard ceiling below kidsout's 10 s timeout (REVIEW.1 F-03).
     if args.command == "state":
-        timeout = cfg.get("state_timeout", 2)
-        deadline = Deadline(cfg.get("state_deadline", 7))
+        # Defaults MUST match config.example.json: v2 shipped 2/7 in code and
+        # 1.5/4 in the example, so with no config.json the driver ran on a pair
+        # documented nowhere (REVIEW.2 G-07).
+        timeout = cfg.get("state_timeout", 1.5)
+        deadline = Deadline(cfg.get("state_deadline", 4))
     else:
         timeout = cfg.get("timeout", 10)
         deadline = Deadline(None)

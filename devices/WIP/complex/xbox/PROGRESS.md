@@ -2,11 +2,12 @@
 
 Tracking file for the v2 rewrite driven by [REVIEW.1.md](REVIEW.1.md).
 
-> **Status as of 2026-09-15: v2 is code-complete and hardware-verified enough to
-> know it is not deployable yet.** The offline suite is green and the transport
-> works against the real router, but hardware verification found four blockers —
-> three of which fail silently. They are specified in **[REVIEW.2.md](REVIEW.2.md)**,
-> which is the input spec for v3. This file records how we got there.
+> **Status as of 2026-09-15: v3 code is written; the router is still untouched.**
+> Hardware verification found four blockers, three of which failed silently
+> (**[REVIEW.2.md](REVIEW.2.md)**). All four are now fixed in code, with
+> regression tests that were mutation-checked to confirm they actually bite.
+> The helper was validated against live conntrack data on the real router.
+> What remains is the write phase: bootstrap, install, and a real block test.
 
 Decisions taken with Paulo before implementation:
 
@@ -105,20 +106,32 @@ Two real defects in v2 were found by writing these tests, not by review:
 - [x] Transport, endpoint discovery, `unknown` path and the driver log — all
       proven against the real router.
 
-### Blocked on v3 code changes (REVIEW.2 §8.1)
+### v3 code changes — DONE 2026-09-15
 
-Do these before touching the router again — four of them are the blockers, and
-running `install`/`block` before they are fixed would only prove they are broken.
+- [x] **G-01 + G-04** — helper's `counters` verb reads `/proc/net/nf_conntrack`
+      and returns a **monotonic accumulator**; the nft table is gone entirely.
+      Validated on the router against live data: monotonic across three samples
+      while tracking 26 concurrent flows.
+- [x] **G-02** — `device.json` carries both interfaces; the one rule names both
+      MACs (`src_mac` as a list); addresses resolved at run time from the lease
+      and neighbour tables rather than from a static IP.
+- [x] **G-03** — `cmd_block` returns non-zero when the flush fails, and
+      `selftest` fails loudly when conntrack-tools is missing or the flowtable
+      has lost its `counter` flag.
+- [x] **G-07** — code defaults now match `config.example.json` (1.5 s / 4 s).
+- [x] **G-08** — mock emits the v3 counters shape; added regression tests for
+      non-monotonic counters, dual-MAC rules and the flush-failure exit code.
+- [x] **G-11** — `conntrack-dump` verb deleted (it dumped the whole household's
+      connections to the credential).
+- [x] **G-12** — `discover --write` preserves `device.json`'s comment instead of
+      dropping it, and records every interface.
+- [x] **S2-01** — `--uninstall` no longer drops `/etc/shadow` to the umask
+      default; it copies with `cp -p` and prints the resulting mode.
 
-- [ ] G-01 + G-04 — helper's `counters` verb reads conntrack and returns a
-      **monotonic accumulator**; drop the nft table entirely.
-- [ ] G-02 — `device.json` carries both interfaces; one rule names both MACs;
-      addresses resolved at run time from lease + neighbour tables.
-- [ ] G-03 — `cmd_block` returns non-zero when the flush fails; `selftest` fails
-      when offload is on and conntrack-tools is absent.
-- [ ] G-07 — one source of truth for `state_timeout` / `state_deadline`.
-- [ ] G-08 — mock emits the new counters shape; add a non-monotonic fixture and a
-      `cmd_block`-flush-failure regression test.
+Offline suite grew from 46 cases / 119 assertions to **53 / 137**. The two most
+important new tests were **mutation-checked**: reverting the multi-MAC rule and
+reverting the block exit code each make them fail, so they are not passing for
+the wrong reason.
 
 ### Then, on hardware, in this order (REVIEW.2 §8.5)
 

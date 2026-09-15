@@ -32,6 +32,7 @@ or standalone:  python3 mock_router.py [port]
 """
 import atexit
 import json
+import re
 import os
 import shutil
 import ssl
@@ -66,8 +67,7 @@ class MockState:
         self.applies = 0
         self.counters = {"xbox_out": 0, "xbox_in": 0}
         self.counters_installed = False
-        self.counter_mac = None
-        self.counter_ip = None
+        self.counter_addrs = []
         self.flushed = []
         self.leases = "1690000000 aa:bb:cc:dd:ee:ff 192.168.2.172 xbox 01:aa:bb:cc:dd:ee:ff\n"
         self.neigh = (
@@ -106,29 +106,39 @@ def helper_exec(st, params):
 
     if verb == "info":
         return {"code": 0, "stderr": "", "stdout": (
-            "firewall=fw4\nnft=yes\nnft_json=yes\n"
+            "firewall=fw4\nnft=yes\n"
             f"conntrack_tools={'no' if st.fail == 'noconntrack' else 'yes'}\n"
-            "proc_nf_conntrack=yes\n"
-            f"counters_table={'yes' if st.counters_installed else 'no'}\n"
-            "openwrt=24.10.0-mock\nipv6_wan=1\n")}
+            "proc_nf_conntrack=yes\nct_acct=1\n"
+            f"flowtable_counter={'NO' if st.fail == 'nocounterflag' else 'yes'}\n"
+            "flowtable_hw=yes\n"
+            f"registered_addrs={' '.join(st.counter_addrs)}\n"
+            "openwrt=24.10.0-mock\nipv6_wan=0\n")}
 
     if verb == "counters":
+        # v3 shape: monotonic totals as plain key/value lines. The real helper
+        # accumulates per-flow router-side so these never decrease; the
+        # 'wentbackwards' failure mode exists to prove the driver copes if the
+        # guarantee is ever violated (REVIEW.2 G-04).
         if st.fail == "nocounters" or not st.counters_installed:
-            return {"code": 4, "stdout": "", "stderr": "counters table missing"}
+            return {"code": 4, "stdout": "", "stderr": "no addresses registered"}
         with st.lock:
-            items = [{"counter": {"family": "inet", "table": "kidsout", "name": k,
-                                  "handle": i, "packets": v // 500, "bytes": v}}
-                     for i, (k, v) in enumerate(sorted(st.counters.items()))]
+            out = int(st.counters.get("xbox_out", 0))
+            inb = int(st.counters.get("xbox_in", 0))
         return {"code": 0, "stderr": "",
-                "stdout": json.dumps({"nftables": [{"metainfo": {"version": "1.0.9"}}] + items})}
+                "stdout": f"xbox_out {out}\nxbox_in {inb}\nsource conntrack\n"}
 
     if verb == "counters-install":
-        if len(args) != 2:
+        # v3 takes a list of ADDRESSES (the console can be on either of its two
+        # interfaces), not a mac/ip pair.
+        if not args:
             return {"code": 2, "stdout": "", "stderr": "bad args"}
-        unchanged = (st.counters_installed and st.counter_mac == args[0]
-                     and st.counter_ip == args[1])
+        for a in args:
+            if not re.fullmatch(r"[0-9a-fA-F.:]+", a):
+                return {"code": 2, "stdout": "", "stderr": f"bad address: {a}"}
+        new = sorted(set(args))
+        unchanged = st.counters_installed and st.counter_addrs == new
         st.counters_installed = True
-        st.counter_mac, st.counter_ip = args[0], args[1]
+        st.counter_addrs = new
         if not unchanged:
             st.reset_counters()
         return {"code": 0, "stderr": "",
@@ -136,6 +146,7 @@ def helper_exec(st, params):
 
     if verb == "counters-remove":
         st.counters_installed = False
+        st.counter_addrs = []
         st.reset_counters()
         return {"code": 0, "stdout": "removed\n", "stderr": ""}
 
@@ -145,18 +156,14 @@ def helper_exec(st, params):
         if not args:
             return {"code": 2, "stdout": "", "stderr": "flush needs at least one address"}
         st.flushed.append(list(args))
-        return {"code": 0, "stdout": "flushed " + " ".join(args) + "\n", "stderr": ""}
+        return {"code": 0, "stderr": "",
+                "stdout": f"flushed {2 * len(args)} entries for " + " ".join(args) + "\n"}
 
     if verb == "neigh":
         return {"code": 0, "stdout": st.neigh, "stderr": ""}
 
     if verb == "leases":
         return {"code": 0, "stdout": st.leases, "stderr": ""}
-
-    if verb == "conntrack-dump":
-        return {"code": 0, "stderr": "", "stdout": (
-            "tcp 6 431997 ESTABLISHED src=192.168.2.172 dst=52.123.1.2 sport=50001 "
-            "dport=443 src=52.123.1.2 dst=192.168.2.1 sport=443 dport=50001 [ASSURED]\n")}
 
     return {"code": 2, "stdout": "", "stderr": f"unknown verb: {verb}"}
 
