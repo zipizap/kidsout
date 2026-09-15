@@ -355,6 +355,35 @@ grep -q "^${RPCD_USER}:" /etc/passwd 2>/dev/null ||
 grep -q "^${RPCD_USER}:" /etc/group 2>/dev/null ||
 	echo "${RPCD_USER}:x:6000:" >> /etc/group
 
+# Create the /etc/shadow entry BEFORE calling passwd(1). Without it busybox
+# passwd prints "no record of <user> in /etc/shadow, using /etc/passwd" and
+# writes the hash straight into /etc/passwd -- which is world-readable (0644),
+# whereas /etc/shadow is 0600. That would leave the credential's hash exposed
+# to every process on the router.
+if ! grep -q "^${RPCD_USER}:" /etc/shadow 2>/dev/null; then
+	umask 077
+	echo "${RPCD_USER}:!:$(( $(date +%s) / 86400 )):0:99999:7:::" >> /etc/shadow
+	umask 022
+fi
+# Belt and braces: if a previous run already put a hash in /etc/passwd, move it
+# out and restore the placeholder.
+pwfield=$(awk -F: -v u="$RPCD_USER" '$1==u{print $2}' /etc/passwd 2>/dev/null)
+case "$pwfield" in
+x | "!" | "*" | "") : ;;
+*)
+	say "moving an exposed password hash out of world-readable /etc/passwd"
+	cp -p /etc/shadow /etc/shadow.kidsout.bak
+	awk -F: -v u="$RPCD_USER" -v h="$pwfield" 'BEGIN{OFS=":"}
+		$1==u{$2=h} {print}' /etc/shadow.kidsout.bak > /etc/shadow
+	rm -f /etc/shadow.kidsout.bak
+	cp -p /etc/passwd /etc/passwd.kidsout.bak
+	awk -F: -v u="$RPCD_USER" 'BEGIN{OFS=":"} $1==u{$2="x"} {print}' \
+		/etc/passwd.kidsout.bak > /etc/passwd
+	rm -f /etc/passwd.kidsout.bak
+	say "NOTE: that hash was readable by anyone on the router. Set a NEW password now."
+	;;
+esac
+
 printf '\n'
 say "set the password for '$RPCD_USER' — you will be prompted twice."
 say "this is NOT the router root password. Pick a fresh one, and put the same"
