@@ -2,11 +2,19 @@
 # ---------------------------------------------------------------------------
 # kidsout xbox — one-time router-side bootstrap.   RUN THIS ON THE ROUTER.
 #
-#   scp router_bootstrap.sh root@192.168.2.1:/tmp/
-#   ssh root@192.168.2.1 sh /tmp/router_bootstrap.sh
+# Upload it, then run it INTERACTIVELY — two separate commands:
 #
-# (or, without scp:  ssh -t root@192.168.2.1 'sh -s' < router_bootstrap.sh
-#  — the password prompt reads from /dev/tty, so piping the script in is fine.)
+#   ssh root@192.168.2.1 'cat > /tmp/router_bootstrap.sh' < router_bootstrap.sh
+#   ssh -t root@192.168.2.1 sh /tmp/router_bootstrap.sh
+#
+# Do NOT pipe the script into ssh (`ssh -t ... 'sh -s' < router_bootstrap.sh`).
+# ssh refuses to allocate a pseudo-terminal when its stdin is a redirect, so
+# the remote side has no /dev/tty and passwd(1) cannot prompt — the run dies
+# at the password step. The script must already be ON the router so that ssh's
+# stdin stays a real terminal.
+#
+# `scp` may not work either: OpenWrt images without openssh-sftp-server have no
+# /usr/libexec/sftp-server, which is why the upload above uses `cat >`.
 #
 # It installs three things and nothing else:
 #

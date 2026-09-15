@@ -127,9 +127,14 @@ real answer with the shipped one was 61 s.
 ### 1. On the router — create the scoped user
 
 ```
-scp router_bootstrap.sh root@192.168.2.1:/tmp/
-ssh root@192.168.2.1 sh /tmp/router_bootstrap.sh
+ssh root@192.168.2.1 'cat > /tmp/router_bootstrap.sh' < router_bootstrap.sh
+ssh -t root@192.168.2.1 sh /tmp/router_bootstrap.sh
 ```
+
+Two commands, and the second one must be interactive. Do **not** pipe the script
+into ssh — ssh will not allocate a pseudo-terminal when its stdin is a redirect,
+so the remote side has no `/dev/tty` and the password prompt fails. `scp` may not
+work either: this router has no `sftp-server`, hence `cat >`.
 
 It prompts for a **new** password (not root's), installs
 `/usr/libexec/kidsout-xbox` and an rpcd ACL scoped to it, and prints the router's
