@@ -127,6 +127,11 @@ Two real defects in v2 were found by writing these tests, not by review:
       dropping it, and records every interface.
 - [x] **S2-01** — `--uninstall` no longer drops `/etc/shadow` to the umask
       default; it copies with `cp -p` and prints the resulting mode.
+- [x] **G-06** — Paulo added a static reservation for the WiFi interface
+      (`dhcp.@host[3]`: `D8:E2:DF:92:A9:90` → `192.168.2.169`), so **both** of
+      the console's addresses are now stable. Runtime address resolution stays
+      — a reservation only takes effect once the console renews its lease, so
+      it makes the resolution reliable rather than unnecessary.
 
 Offline suite grew from 46 cases / 119 assertions to **53 / 137**. The two most
 important new tests were **mutation-checked**: reverting the multi-MAC rule and
@@ -302,8 +307,10 @@ use whichever is live. fw4 parses `src_mac` as a list (`fw4.uc:2314`, `PARSE_LIS
 so a single rule can name both. Accounting should resolve the console's current
 address(es) from the lease/neighbour table by MAC rather than trusting a static IP.
 
-Note also that `.169` has **no static reservation**, so that address can change.
-Either add a reservation for `...90`, or resolve dynamically — preferably both.
+~~Note also that `.169` has **no static reservation**, so that address can
+change.~~ **Resolved 2026-09-15**: Paulo added `dhcp.@host[3]` reserving
+`192.168.2.169` for `D8:E2:DF:92:A9:90`. Both interfaces are now pinned, and the
+driver resolves addresses at run time as well.
 
 ### Third finding: offload defeats enforcement too, and the flush is currently a no-op
 

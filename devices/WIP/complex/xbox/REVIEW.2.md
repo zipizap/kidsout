@@ -5,6 +5,9 @@
 **Subject:** `devices/WIP/complex/xbox` @ commit `e5b9517`, verified against the
 real OpenWrt router and the real console
 **Predecessor:** [REVIEW.1.md](REVIEW.1.md) — the spec v2 was written against
+**Remediation status:** all four blockers (G-01…G-04) plus G-06, G-07, G-08,
+G-11, G-12 and S2-01 were fixed on 2026-09-15 — see [PROGRESS.md](PROGRESS.md).
+What remains is the write phase on the router, which nothing here can pre-verify.
 **Tracking:** [PROGRESS.md](PROGRESS.md) · [F-06.md](F-06.md) · [S-02.md](S-02.md)
 
 **Purpose of this document:** REVIEW.1 was a code review against a contract, and
@@ -97,7 +100,7 @@ finding's *status* changed.
 | G-03 | **Blocker** | `block.sh` exits 0 when the conntrack flush fails, and conntrack-tools is absent → it reports success while the console keeps playing | hardware + code |
 | G-04 | **Blocker** | A conntrack byte sum is non-monotonic; `sample_rate` assumes monotonic counters | hardware |
 | G-05 | High | The driver is not discoverable by kidsout from `devices/WIP/complex/xbox` | code |
-| G-06 | High | The WiFi interface has no static DHCP reservation | hardware |
+| G-06 | High | ~~The WiFi interface has no static DHCP reservation~~ **RESOLVED** — `dhcp.@host[3]` added 2026-09-15 | hardware |
 | G-07 | High | `state_timeout` / `state_deadline` defaults disagree across four files; the live values are neither documented pair | code |
 | G-08 | Medium | `mock_router.py` cannot model the offload path, so the suite validated a dead design | code |
 | G-09 | Medium | `bridge` is not installed on the router; fdb-based port lookup fails | hardware |

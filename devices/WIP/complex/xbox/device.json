@@ -4,7 +4,7 @@
   "hostname": "xbox.infracon.ovh",
   "ipv4": "192.168.2.172",
   "mac": "d8:e2:df:92:a9:93",
-  "comment": "The console has TWO interfaces and switches between them whenever the cable is plugged or pulled: ethernet d8:e2:df:92:a9:93 (192.168.2.172, static reservation dhcp.@host[1]) and WiFi d8:e2:df:92:a9:90 (192.168.2.169, DYNAMIC lease - no reservation, so this address can change). Both were confirmed on the router 2026-09-15. The firewall rule names EVERY mac in 'interfaces', because a rule naming only one matches nothing while the console is on the other and the block would silently fail open (REVIEW.2 G-02). Accounting resolves the live address at run time from the lease and neighbour tables rather than trusting 'ipv4' here. The top-level 'mac'/'ipv4' keys are legacy aliases for interfaces[0] and are not used when 'interfaces' is present.",
+  "comment": "The console has TWO interfaces and switches between them whenever the cable is plugged or pulled: ethernet d8:e2:df:92:a9:93 (192.168.2.172, static reservation dhcp.@host[1]) and WiFi d8:e2:df:92:a9:90 (192.168.2.169, static reservation dhcp.@host[3], added 2026-09-15). Both addresses are therefore stable. The firewall rule names EVERY mac in 'interfaces', because a rule naming only one matches nothing while the console is on the other and the block would silently fail open (REVIEW.2 G-02). Accounting still resolves the live address at run time from the lease and neighbour tables and treats these as a fallback: the reservations make that resolution reliable rather than unnecessary, since a reservation only takes effect once the console renews. The top-level 'mac'/'ipv4' keys are legacy aliases for interfaces[0] and are unused when 'interfaces' exists.",
   "network": {
     "zone": "lan",
     "wan_zone": "wan"
@@ -36,12 +36,14 @@
     {
       "mac": "d8:e2:df:92:a9:93",
       "ipv4": "192.168.2.172",
-      "link": "ethernet"
+      "link": "ethernet",
+      "reservation": "dhcp.@host[1]"
     },
     {
       "mac": "d8:e2:df:92:a9:90",
       "ipv4": "192.168.2.169",
-      "link": "wifi"
+      "link": "wifi",
+      "reservation": "dhcp.@host[3]"
     }
   ]
 }
