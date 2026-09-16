@@ -12,7 +12,7 @@ the return value of the function that was supposed to change it.
 import sys
 
 from mock_router import MockRouter
-from testlib import Suite, captured, device, load_driver, tmpdir
+from testlib import Suite, captured, device, load_driver, out_of, tmpdir
 
 
 def main():
@@ -143,6 +143,45 @@ def main():
             flushed = mock.state.flushed[-1] if mock.state.flushed else []
             c.check("192.168.2.169" in flushed,
                     f"flushed the LIVE wifi address, not just the static one: {flushed}")
+
+        # ---- G-02 again, in the diagnostics: `check` and `status` used the
+        # top-level mac/ipv4 scalars, which named interfaces[0] only. A console
+        # sitting on WiFi was therefore reported as powered off. ------------ #
+        with s.case("`check` finds the console on EITHER interface (G-02)") as c:
+            both = device(macs=[("d8:e2:df:92:a9:93", "192.168.2.172", "ethernet"),
+                                ("d8:e2:df:92:a9:90", "192.168.2.169", "wifi")])
+            # cable pulled: only the WiFi interface is in the neighbour table
+            mock.state.neigh = ("192.168.2.169 dev br-lan lladdr "
+                                "d8:e2:df:92:a9:90 REACHABLE\n")
+            with captured() as buf:
+                rc = m.cmd_check(fw(), both, None)
+            text = out_of(buf)
+            c.eq(rc, 0, "console on WiFi is PRESENT, not 'powered off'")
+            c.check("d8:e2:df:92:a9:90" in text, f"reported the live interface: {text}")
+
+        with s.case("`check` reports absent only when NO interface is seen") as c:
+            both = device(macs=[("d8:e2:df:92:a9:93", "192.168.2.172", "ethernet"),
+                                ("d8:e2:df:92:a9:90", "192.168.2.169", "wifi")])
+            mock.state.neigh = ("192.168.2.50 dev br-lan lladdr "
+                                "11:22:33:44:55:66 STALE\n")
+            with captured() as buf:
+                rc = m.cmd_check(fw(), both, None)
+            text = out_of(buf)
+            c.eq(rc, 1, "genuinely absent -> exit 1")
+            c.check("d8:e2:df:92:a9:93" in text and "d8:e2:df:92:a9:90" in text,
+                    f"names every MAC it looked for: {text}")
+
+        with s.case("`status` lists every configured interface") as c:
+            both = device(macs=[("d8:e2:df:92:a9:93", "192.168.2.172", "ethernet"),
+                                ("d8:e2:df:92:a9:90", "192.168.2.169", "wifi")])
+            mock.state.neigh = ("192.168.2.169 dev br-lan lladdr "
+                                "d8:e2:df:92:a9:90 REACHABLE\n")
+            with captured() as buf:
+                rc = m.cmd_status(fw(), both, None)
+            text = out_of(buf)
+            c.eq(rc, 0, "status ran")
+            c.check("d8:e2:df:92:a9:93" in text, f"ethernet interface shown: {text}")
+            c.check("d8:e2:df:92:a9:90" in text, f"wifi interface shown: {text}")
 
         # ---- REVIEW.2 G-03: a failed flush must not report success -------- #
         with s.case("block reports FAILURE when the conntrack flush fails (G-03)") as c:

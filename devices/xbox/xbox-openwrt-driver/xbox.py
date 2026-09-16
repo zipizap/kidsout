@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-kidsout device driver: Xbox (xbox.infracon.ovh -> 192.168.2.172)
+kidsout device driver: Xbox (two interfaces, see device.json)
 
 Controls the console through an OpenWrt router's ubus-over-HTTP JSON-RPC API
 (uhttpd-mod-ubus + rpcd), using a dedicated, ACL-scoped rpcd login and a
@@ -466,8 +466,10 @@ def interfaces(device):
     be keyed on an interface the console was not using -- matching nothing,
     while still reporting success (REVIEW.2 G-02). Both must be covered.
 
-    Falls back to the legacy scalar mac/ipv4 keys so an old device.json still
-    works, and so does the offline suite.
+    This is the ONLY reader of the console's identity. The top-level
+    mac/ipv4 scalars it used to fall back to are gone: they named interface
+    [0] alone, so every caller that reached for them silently ignored the
+    other interface -- which is the same G-02 bug wearing a different hat.
     """
     out = []
     for e in device.get("interfaces") or []:
@@ -476,11 +478,6 @@ def interfaces(device):
             out.append({"mac": mac,
                         "ipv4": (e.get("ipv4") or "").strip(),
                         "link": e.get("link") or "?"})
-    if not out:
-        mac = (device.get("mac") or "").strip().lower()
-        if MAC_RE.fullmatch(mac):
-            out.append({"mac": mac, "ipv4": (device.get("ipv4") or "").strip(),
-                        "link": "?"})
     return out
 
 
@@ -613,8 +610,10 @@ def live_addresses(fw, device):
     Resolved at run time from the DHCP lease file and the neighbour table
     rather than trusting device.json's static IPv4, because only one of the
     console's two interfaces is up at a time and the other one's address is
-    stale by definition. The WiFi interface also has no static reservation, so
-    its address can change at any renewal (REVIEW.2 G-02, G-06).
+    stale by definition. Both interfaces do now hold a static DHCP reservation
+    (see device.json's comment), but a reservation only takes effect once the
+    console renews, so it makes this resolution reliable rather than
+    unnecessary (REVIEW.2 G-02, G-06).
 
     Returns (addresses, links) where links maps address -> how we found it.
     """
@@ -1056,7 +1055,6 @@ def _write_probe(fw):
 
 
 def cmd_status(fw, device, _args):
-    ip = device["ipv4"]
     try:
         print(f"endpoint : {fw.probe()}")
     except Exception as e:
@@ -1109,8 +1107,10 @@ def cmd_status(fw, device, _args):
 
     try:
         addrs = console_addresses(fw, device)
-        print(f"console  : {ip} mac={device.get('mac')} "
-              f"addresses seen on the router: {', '.join(addrs)}")
+        configured = ", ".join(f"{e['link']}={e['mac']}/{e['ipv4'] or '?'}"
+                               for e in interfaces(device)) or "NONE"
+        print(f"console  : configured {configured}")
+        print(f"           addresses seen on the router: {', '.join(addrs)}")
         if len(addrs) > 1:
             print("           (IPv6 present — the MAC-based rule covers it)")
     except Exception as e:
@@ -1126,14 +1126,21 @@ def cmd_check(fw, device, _args):
     was 'closed/filtered' whatever the console was doing (REVIEW.1 F-14). The
     router's neighbour table is the honest test, and works despite the console
     ignoring ICMP.
+
+    Every interface is tested, not just the first. Matching on the legacy
+    scalar mac/ipv4 meant a console sitting on WiFi was reported as powered
+    off, because only the ethernet MAC was ever compared (REVIEW.2 G-02).
     """
-    mac = (device.get("mac") or "").lower()
-    ip = device["ipv4"]
+    macs = [e["mac"] for e in interfaces(device)]
+    ips = static_addresses(device)
     rows = fw.helper_ok("neigh").splitlines()
-    hits = [r.strip() for r in rows if (mac and mac in r.lower()) or r.startswith(ip + " ")]
+    hits = [r.strip() for r in rows
+            if any(m in r.lower() for m in macs)
+            or any(r.startswith(ip + " ") for ip in ips)]
     if not hits:
         print(f"console: NOT present in the router's neighbour table "
-              f"(ip={ip} mac={mac or 'unknown'}) — powered off, or fully asleep")
+              f"(macs={', '.join(macs) or 'none'} "
+              f"ips={', '.join(ips) or 'none'}) — powered off, or fully asleep")
         return 1
     for h in hits:
         print(f"console: {h}")
@@ -1209,11 +1216,7 @@ def cmd_discover(fw, device, args):
         {"mac": m, "ipv4": v.get("ipv4", ""), "link": v.get("link", "?")}
         for m, v in sorted(merged.items())
     ]
-    # Keep the legacy scalars pointing at the first interface, and PRESERVE the
-    # provenance comment instead of dropping it (REVIEW.2 G-12).
-    if dev["interfaces"]:
-        dev["mac"] = dev["interfaces"][0]["mac"]
-        dev["ipv4"] = dev["interfaces"][0]["ipv4"] or dev.get("ipv4", "")
+    # PRESERVE the provenance comment instead of dropping it (REVIEW.2 G-12).
     dev["comment"] = (f"interfaces discovered {time.strftime('%Y-%m-%d')}: "
                       + "; ".join(f"{e['mac']}={e['ipv4']}" for e in dev["interfaces"])
                       + ". The firewall rule names every MAC, so the block holds "

@@ -41,12 +41,8 @@ def device(mac="aa:bb:cc:dd:ee:ff", macs=None, ipv4="192.168.2.172", **over):
     if macs:
         d["interfaces"] = [{"mac": m, "ipv4": ip, "link": lk}
                            for m, ip, lk in macs]
-        d["mac"] = macs[0][0]
-        d["ipv4"] = macs[0][1]
     else:
         d["interfaces"] = [{"mac": mac, "ipv4": ipv4, "link": "?"}]
-        d["mac"] = mac
-        d["ipv4"] = ipv4
     # Drop any real router pin: device.json carries the production
     # certificate fingerprint once ./xbox.py pin has been run, and the mock
     # serves its own self-signed cert, so an inherited pin would (correctly)
