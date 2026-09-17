@@ -23,7 +23,7 @@ Webserver for a parental-control webpage of weekly time used/available of multip
   - `deviceName` (xbox, tv, tablet) [rB]
   - `deviceStatus` (`inUse`, `notInUse`, `blockedNoTime`, `blockedNotInTimeframe`, `blockedPauseON`, `enforcementOFF`) Calculated by backend every 1m and read by webpage [cB][rW]
     Some related vars:  
-    - `enforcementToggle` = `enforcementON` (default) or `enforcementOFF` [wU][rW]
+    - `enforcementToggle` = `enforcementON` or `enforcementOFF` (default for a newly discovered device) [wU][rW]
     - `pauseToggle` = `pauseON` or `pauseOFF` (default) [wU][rW]
     - `pauseMinutesRemaining` = 20,19,18,...,0 [cB][rW]
     - `stateHistory` = last N (20) up/down/unknown ticks of `getState.sh`, oldest→newest (-1 unknown, 0 down, 1 up); in-memory only (not persisted to runtimestore.yaml), sampled every 1m tick [cB][rW]
@@ -111,7 +111,7 @@ Webserver for a parental-control webpage of weekly time used/available of multip
     - set all device-weekday-cells of this device to info-cell-mode, with info-text "FREE (enforcementOFF)"
   - Ghosted (greyed out, not clickable) while `pauseToggle` is `pauseON` — enforcement and pause are mutually exclusive modes. (The enforcement-toggle's own button stays live when `enforcementOFF` so it can always be re-enabled.)
   - vars:
-    - `enforcementToggle` = `enforcementON` (default) or `enforcementOFF`
+    - `enforcementToggle` = `enforcementON` or `enforcementOFF` (default for a newly discovered device)
 
 - `deviceStatus` shown with smaller-font, in light-color, as a non-distractive information
 

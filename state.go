@@ -113,15 +113,18 @@ func defaultDayVars() *DayVars {
 	return &DayVars{TAMinutes: 120, TUMinutes: 0, TFStart: "09:00", TFEnd: "21:00"}
 }
 
+// defaultDeviceState is what a device gets the first time it is discovered in
+// the devices dir: enforcement OFF, so a freshly added device is never blocked
+// until the admin reviews its limits/windows and switches enforcement ON.
 func defaultDeviceState() *DeviceState {
 	days := map[string]*DayVars{}
 	for _, wd := range weekdayKeys {
 		days[wd] = defaultDayVars()
 	}
 	return &DeviceState{
-		EnforcementToggle: EnforcementON,
+		EnforcementToggle: EnforcementOFF,
 		PauseToggle:       PauseOFF,
-		DeviceStatus:      StatusNotInUse,
+		DeviceStatus:      StatusEnforcementOFF,
 		Days:              days,
 	}
 }
@@ -153,6 +156,8 @@ func LoadStateStore(path string, deviceNames []string) (*StateStore, error) {
 			s.data.Devices[name] = defaultDeviceState()
 			continue
 		}
+		// already-known device with the field emptied by hand: fail safe to ON
+		// (only brand-new devices start OFF, see defaultDeviceState)
 		if ds.EnforcementToggle == "" {
 			ds.EnforcementToggle = EnforcementON
 		}

@@ -55,6 +55,7 @@ func TestBlockedNotInTimeframeCancelsPause(t *testing.T) {
 	today := weekdayKeys[time.Now().Weekday()]
 	store.With(func(st *Store) {
 		ds := st.Devices["dev1"]
+		ds.EnforcementToggle = EnforcementON // new devices default to OFF
 		ds.PauseToggle = PauseON
 		ds.PauseMinutesRemaining = 15
 		// timeframe that "now" can never be within -> blockedNotInTimeframe
@@ -197,8 +198,10 @@ func TestFreeUseModeDoesNotAccrueTU(t *testing.T) {
 	eng := NewEngine(devicesDir, store, func() {})
 	today := weekdayKeys[time.Now().Weekday()]
 
-	// full-day timeframe so the test does not depend on the wall-clock time
+	// enforcing (new devices default to OFF) with a full-day timeframe, so the
+	// test does not depend on the wall-clock time
 	store.With(func(st *Store) {
+		st.Devices["dev1"].EnforcementToggle = EnforcementON
 		d := st.Devices["dev1"].Days[today]
 		d.TFStart, d.TFEnd = "00:00", "23:59"
 	})
@@ -336,6 +339,7 @@ func TestUnpauseKeepsInUseWhenDeviceUp(t *testing.T) {
 
 	today := weekdayKeys[time.Now().Weekday()]
 	store.With(func(st *Store) {
+		st.Devices["dev1"].EnforcementToggle = EnforcementON // new devices default to OFF
 		d := st.Devices["dev1"].Days[today]
 		d.TFStart, d.TFEnd = "00:00", "23:59"
 	})
@@ -370,4 +374,36 @@ func TestUnpauseKeepsInUseWhenDeviceUp(t *testing.T) {
 	if s := status(); s != StatusInUse {
 		t.Fatalf("after pauseOFF: got %q, want inUse (must not flash notInUse)", s)
 	}
+}
+
+func TestNewDeviceStartsWithEnforcementOFF(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rs.yaml")
+	store, err := LoadStateStore(path, []string{"dev1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.Read(func(st *Store) {
+		ds := st.Devices["dev1"]
+		if ds.EnforcementToggle != EnforcementOFF {
+			t.Errorf("new device: enforcementToggle = %q, want %q", ds.EnforcementToggle, EnforcementOFF)
+		}
+		if ds.DeviceStatus != StatusEnforcementOFF {
+			t.Errorf("new device: deviceStatus = %q, want %q", ds.DeviceStatus, StatusEnforcementOFF)
+		}
+	})
+
+	// a device already in the store keeps its toggle when a second device appears
+	store.With(func(st *Store) { st.Devices["dev1"].EnforcementToggle = EnforcementON })
+	store2, err := LoadStateStore(path, []string{"dev1", "dev2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store2.Read(func(st *Store) {
+		if got := st.Devices["dev1"].EnforcementToggle; got != EnforcementON {
+			t.Errorf("existing device: enforcementToggle = %q, want %q", got, EnforcementON)
+		}
+		if got := st.Devices["dev2"].EnforcementToggle; got != EnforcementOFF {
+			t.Errorf("newly added device: enforcementToggle = %q, want %q", got, EnforcementOFF)
+		}
+	})
 }
