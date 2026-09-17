@@ -1333,9 +1333,21 @@ def main():
 
     fw = Router(cfg, device, timeout=timeout, deadline=deadline)
 
-    if args.command not in ("probe", "state") and not cfg:
-        sys.exit(f"no {os.path.basename(CONFIG_FILE)} — copy config.example.json to "
-                 f"config.json and fill in the rpcd credentials (see DESIGN.md §7).")
+    # 'probe' is the only command that needs no credentials. Without a config
+    # the others post session.login with an empty password and surface rpcd's
+    # 'permission denied', which reads as a router-side fault when the real one
+    # is a missing file on this machine.
+    if not cfg and args.command != "probe":
+        missing = (f"no {os.path.basename(CONFIG_FILE)} — copy config.example.json to "
+                   f"config.json and fill in the rpcd credentials (see DESIGN.md §7).")
+        if args.command == "state":
+            # one word on stdout is the contract, local fault or not, and the
+            # log is the only diagnostic channel upstream does not discard
+            print("unknown")
+            log(f"state=unknown error={missing}")
+            print(f"xbox state unknown: {missing}", file=sys.stderr)
+            sys.exit(1)
+        sys.exit(missing)
 
     try:
         rc = COMMANDS[args.command](fw, device, args)

@@ -142,6 +142,24 @@ def main():
                                  f"stalls kidsout's whole evaluation tick")
             mock.state.fail = None
 
+        with s.case("a missing config.json is reported as such, not as the router's fault") as c:
+            cfg = os.path.join(drv, "config.json")
+            logf = os.path.join(drv, "xbox.log")
+            mark = os.path.getsize(logf)
+            os.rename(cfg, cfg + ".away")
+            try:
+                p, elapsed = run("getState.sh", "/", d)
+            finally:
+                os.rename(cfg + ".away", cfg)
+            c.eq(p.stdout.strip(), "unknown", "still exactly one contract word")
+            c.check(elapsed < 5, f"and it fails locally, without a round trip ({elapsed:.2f}s)")
+            with open(logf) as f:
+                f.seek(mark)
+                tail = f.read()
+            c.check("config.json" in tail, "the log names the file that is missing")
+            c.check("permission denied" not in tail,
+                    "and does not blame rpcd for a fault on this machine")
+
         with s.case("the driver keeps its own log") as c:
             logf = os.path.join(drv, "xbox.log")
             c.check(os.path.exists(logf), "xbox.log was created")
