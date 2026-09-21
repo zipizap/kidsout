@@ -9,6 +9,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"kidsout/version"
 )
 
 func testState() State {
@@ -299,9 +301,14 @@ func TestSplitFlagsInterspersed(t *testing.T) {
 }
 
 func TestVersionAndHelp(t *testing.T) {
+	t.Setenv("KOAUTH", "")
+	t.Setenv("KIDSOUT_AUTH", "")
 	var out, errBuf bytes.Buffer
-	if code := run([]string{"version"}, &out, &errBuf); code != 0 || !strings.Contains(out.String(), "kidsoutctl") {
+	if code := run([]string{"version"}, &out, &errBuf); code != 0 || !strings.Contains(out.String(), "kidsoutctl "+version.Version) {
 		t.Errorf("version: code=%d out=%q", code, out.String())
+	}
+	if strings.Contains(out.String(), "server:") {
+		t.Errorf("version without credentials must not contact the server: %q", out.String())
 	}
 	out.Reset()
 	if code := run([]string{"help"}, &out, &errBuf); code != 0 || !strings.Contains(out.String(), "Usage:") {
@@ -342,5 +349,36 @@ func TestWatchOnce(t *testing.T) {
 	}
 	if !strings.Contains(out, "xbox") {
 		t.Errorf("watch output missing device:\n%s", out)
+	}
+}
+
+func TestVersionReportsServer(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/version" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"app":"kidsout","version":"9.9.9","commit":"abc1234","goVersion":"go1.25","os":"linux","arch":"amd64"}`))
+	}))
+	defer ts.Close()
+	t.Setenv("KOAUTH", "u:p")
+	t.Setenv("KIDSOUT_AUTH", "")
+
+	var out, errBuf bytes.Buffer
+	if code := run([]string{"version", "--server", ts.URL}, &out, &errBuf); code != 0 {
+		t.Fatalf("version: code=%d err=%q", code, errBuf.String())
+	}
+	if !strings.Contains(out.String(), "server: kidsout 9.9.9 (commit abc1234") {
+		t.Errorf("server version not reported: %q", out.String())
+	}
+
+	// Unreachable server: still exit 0, client version first.
+	out.Reset()
+	if code := run([]string{"version", "--server", "http://127.0.0.1:1", "--timeout", "500ms"}, &out, &errBuf); code != 0 {
+		t.Fatalf("version (unreachable): code=%d", code)
+	}
+	if !strings.HasPrefix(out.String(), "kidsoutctl ") || !strings.Contains(out.String(), "server: unavailable") {
+		t.Errorf("unreachable server output: %q", out.String())
 	}
 }

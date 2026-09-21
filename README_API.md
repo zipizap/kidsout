@@ -69,6 +69,21 @@ Response (trimmed):
 | `taMinutes` / `tuMinutes` / `trMinutes` | Time allowed / used / remaining, `tr = max(0, ta-tu)` |
 | `tfStart` / `tfEnd` | Allowed daily time-frame |
 
+### GET /api/version — server build identity
+
+Which release is running. Useful to confirm an upgrade landed, or to let a
+client (e.g. `kidsoutctl version`) show client and server versions side by side.
+
+```bash
+curl -u "$KOAUTH" "$KO/api/version"
+```
+
+```json
+{"app":"kidsout","version":"1.0.0","commit":"83544b0","goVersion":"go1.25.5","os":"linux","arch":"amd64"}
+```
+
+`commit` is `"none"` for binaries not built with `go_build.sh`.
+
 ### GET /api/events — live updates (SSE)
 
 Server-Sent Events stream. Each event's `data:` is the same JSON as `/api/state`.

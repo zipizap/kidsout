@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"kidsout/version"
 )
 
 const authCookieName = "kidsout_session"
@@ -274,6 +276,12 @@ func (s *Server) Routes(mux *http.ServeMux, webFS http.Handler) {
 
 	mux.HandleFunc("GET /api/events", func(w http.ResponseWriter, r *http.Request) {
 		s.hub.ServeHTTP(w, r, snapshotJSON(s.store))
+	})
+
+	// GET /api/version  {"app":"kidsout","version":"1.0.0","commit":"...", ...}
+	mux.HandleFunc("GET /api/version", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(version.Get("kidsout"))
 	})
 
 	// POST /api/device/{name}/ta  {"weekday":"fri","deltaMinutes":10}

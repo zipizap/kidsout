@@ -21,7 +21,8 @@
 
 ## Architecture
 
-Four small files, one `main` package (`kidsout/kidsoutctl`):
+Four small files, one `main` package (`kidsout/kidsoutctl`), plus the parent
+module's `kidsout/version` package for the shared version/commit banner:
 
 ```
 main.go       flag parsing, command dispatch, usage text, exit-code mapping

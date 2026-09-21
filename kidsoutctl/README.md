@@ -47,7 +47,8 @@ don't leak into shell history or `ps` output.
 | `ta <device> <weekday\|today> <±minutes>` | Adjust TimeAllowed (delta) |
 | `tf <device> <weekday\|today> <HH:MM> <HH:MM>` | Set TimeFrame window (when it can be allowed)  |
 | `completion bash` | Bash tab-completion script |
-| `version`, `help` | The usual |
+| `version` | Client version; also the server's (via `GET /api/version`) when `KOAUTH` is set |
+| `help` | Usage text |
 
 Weekdays: `sun mon tue wed thu fri sat`, or `today` (resolved server-side).
 
@@ -86,7 +87,14 @@ kidsoutctl tf tablet sat 10:00 22:00    # Saturday window
 
 kidsoutctl get -v2                      # show request timings on stderr
 kidsoutctl get -o json | jq -r '.devices.xbox.deviceStatus'
+
+kidsoutctl version                      # client and server build identity
+# kidsoutctl 1.0.0 (commit 83544b0, go1.25.5 linux/amd64)
+# server: kidsout 1.0.0 (commit 83544b0, go1.25.5 linux/amd64)
 ```
+
+`version` never fails: without credentials it prints only the client line, and an
+unreachable server is reported as `server: unavailable (...)` with exit code 0.
 
 ## Exit codes
 
@@ -110,5 +118,9 @@ kidsoutctl completion bash | sudo tee /etc/bash_completion.d/kidsoutctl
 go test ./kidsoutctl/    # unit tests run against an httptest server — no live API needed
 go vet ./kidsoutctl/
 ```
+
+The version string comes from the shared `kidsout/version` package, so the client
+and the server report the same release. `./go_build.sh` stamps the git commit;
+`VERSION=1.2.3 ./go_build.sh` overrides the version.
 
 See [DESIGN.md](DESIGN.md) for architecture and decisions.

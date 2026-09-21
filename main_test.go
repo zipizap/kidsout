@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -9,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"kidsout/version"
 )
 
 func TestDecideStatusOrder(t *testing.T) {
@@ -406,4 +409,31 @@ func TestNewDeviceStartsWithEnforcementOFF(t *testing.T) {
 			t.Errorf("newly added device: enforcementToggle = %q, want %q", got, EnforcementOFF)
 		}
 	})
+}
+
+func TestVersionFlagAndEndpoint(t *testing.T) {
+	if got := version.String("kidsout"); !strings.HasPrefix(got, "kidsout "+version.Version+" (commit ") {
+		t.Errorf("version.String = %q", got)
+	}
+
+	store, err := LoadStateStore(filepath.Join(t.TempDir(), "rs.yaml"), []string{"dev1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &Server{store: store, hub: NewSSEHub()}
+	mux := http.NewServeMux()
+	srv.Routes(mux, http.NotFoundHandler())
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/api/version", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/version: %d", rec.Code)
+	}
+	var info version.Info
+	if err := json.Unmarshal(rec.Body.Bytes(), &info); err != nil {
+		t.Fatal(err)
+	}
+	if info.App != "kidsout" || info.Version != version.Version || info.Commit != version.Commit || info.GoVersion == "" {
+		t.Errorf("unexpected /api/version payload: %+v", info)
+	}
 }

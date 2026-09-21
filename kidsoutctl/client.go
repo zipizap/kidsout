@@ -12,6 +12,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"kidsout/version"
 )
 
 // State mirrors the /api/state response.
@@ -183,6 +185,19 @@ func (c *Client) GetState(ctx context.Context) (*State, []byte, error) {
 		return nil, nil, fmt.Errorf("decoding /api/state: %w", err)
 	}
 	return &s, raw, nil
+}
+
+// GetVersion fetches /api/version (server build identity).
+func (c *Client) GetVersion(ctx context.Context) (*version.Info, error) {
+	raw, err := c.do(ctx, http.MethodGet, "/api/version", nil)
+	if err != nil {
+		return nil, err
+	}
+	var v version.Info
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return nil, fmt.Errorf("decoding /api/version: %w", err)
+	}
+	return &v, nil
 }
 
 func (c *Client) SetPause(ctx context.Context, device string, on bool) error {

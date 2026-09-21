@@ -129,8 +129,16 @@ Or run without building a binary:
 On start you should see:
 
 ```
+2026/07/31 19:44:07 kidsout 1.0.0 (commit 83544b0, go1.25.5 linux/amd64)
 2026/07/31 19:44:07 devices: [tablet tv xbox]
 2026/07/31 19:44:07 listening on :8080
+```
+
+To check which build you have without starting the server:
+
+```bash
+./kidsout --version
+# kidsout 1.0.0 (commit 83544b0, go1.25.5 linux/amd64)
 ```
 
 Open http://localhost:8080/ and log in (default `mae` / `pai` — change this, see below).
@@ -194,7 +202,19 @@ sudo systemctl enable --now kidsout
 ## Configuration
 
 Kidsout is configured through **environment variables** (paths/port) and two files that
-live next to the binary.
+live next to the binary. The binary itself takes only two flags.
+
+### Command-line flags
+
+| Flag | Purpose |
+|---|---|
+| `--version` | Print `kidsout <version> (commit <hash>, <go> <os>/<arch>)` and exit |
+| `--help` | Print usage, including the environment variables below, and exit |
+
+The version comes from `version/version.go` and is bumped together with
+[CHANGELOG.md](CHANGELOG.md). `go_build.sh` stamps the git commit into the binary;
+`VERSION=1.2.3 ./go_build.sh` overrides the version for pre-release builds. The same
+information is served on `GET /api/version` (see the [API reference](README_API.md)).
 
 ### Environment variables
 

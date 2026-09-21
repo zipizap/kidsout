@@ -13,9 +13,12 @@ set -o nounset
 
 cd "${__dir}"
 APPNAME=$(basename $PWD)
+# Build identity (see ../version/version.go). Commit is stamped from git;
+# VERSION=x.y.z ./go_build.sh overrides the version baked into the source.
 COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo none)
-CGO_ENABLED=0 GOOS=linux go build -a -trimpath \
-  -ldflags "-s -w -extldflags \"-static\" -X main.commit=${COMMIT}" \
-  -o ${APPNAME} .
+LDFLAGS="-s -w -extldflags \"-static\" -X kidsout/version.Commit=${COMMIT}"
+[[ -n "${VERSION:-}" ]] && LDFLAGS="${LDFLAGS} -X kidsout/version.Version=${VERSION}"
+CGO_ENABLED=0 GOOS=linux go build -a -trimpath -ldflags "${LDFLAGS}" -o ${APPNAME} .
+./${APPNAME} version
 
 ls -lrth

@@ -4,6 +4,8 @@ import (
 	"context"
 	"embed"
 	"errors"
+	"flag"
+	"fmt"
 	"io/fs"
 	"log"
 	"net/http"
@@ -11,16 +13,49 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
+	"kidsout/version"
 )
 
 //go:embed web
 var webFiles embed.FS
 
+const usageText = `kidsout — parental control of screen time across devices
+
+Usage:
+  kidsout [flags]
+
+Flags:
+  -version, --version   Print version information and exit
+  -h, --help            Show this help
+
+Configuration is taken from the environment:
+  KIDSOUT_LISTEN          Address/port to listen on        (default ":8080")
+  KIDSOUT_DEVICES_DIR     Folder with one sub-folder per device (default "devices")
+  KIDSOUT_RUNTIMESTORE    Where runtime state is persisted (default "runtimestore.yaml")
+
+See README.md for the full administrator guide.
+`
+
 func main() {
+	showVersion := flag.Bool("version", false, "print version information and exit")
+	flag.Usage = func() { fmt.Fprint(flag.CommandLine.Output(), usageText) }
+	flag.Parse()
+	if *showVersion {
+		fmt.Println(version.String("kidsout"))
+		return
+	}
+	if flag.NArg() > 0 {
+		fmt.Fprintf(os.Stderr, "kidsout: unexpected argument %q\n\n", flag.Arg(0))
+		flag.Usage()
+		os.Exit(2)
+	}
+
 	devicesDir := envOr("KIDSOUT_DEVICES_DIR", "devices")
 	storePath := envOr("KIDSOUT_RUNTIMESTORE", "runtimestore.yaml")
 	listenAddr := envOr("KIDSOUT_LISTEN", ":8080")
 
+	log.Print(version.String("kidsout"))
 	deviceNames, err := DiscoverDevices(devicesDir)
 	if err != nil {
 		log.Fatal(err)

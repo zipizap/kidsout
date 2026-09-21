@@ -2,22 +2,22 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"regexp"
-	"runtime"
 	"strings"
 	"time"
+
+	"kidsout/version"
 )
 
-// Overridable at build time: -ldflags "-X main.version=... -X main.commit=..."
-var (
-	version = "1.0.0"
-	commit  = "none"
-)
+// Version and commit come from the shared kidsout/version package, so the
+// server and the client report the same release. go_build.sh stamps the
+// commit with -ldflags "-X kidsout/version.Commit=...".
 
 const defaultServer = "http://localhost:8080"
 
@@ -40,7 +40,7 @@ Device commands:
 
 Other commands:
   completion bash                  Print a bash completion script
-  version                          Print version information
+  version                          Print client version (and the server's, if KOAUTH is set)
   help                             Show this help
 
 Flags:
@@ -217,8 +217,21 @@ func run(argv []string, stdout, stderr io.Writer) int {
 		fmt.Fprint(stdout, usageText)
 		return 0
 	case "version":
-		fmt.Fprintf(stdout, "kidsoutctl %s (commit %s, %s %s/%s)\n",
-			version, commit, runtime.Version(), runtime.GOOS, runtime.GOARCH)
+		fmt.Fprintln(stdout, version.String("kidsoutctl"))
+		// Best effort: also report the server's version when we can reach it.
+		// Never fails the command — the client version is the contract here.
+		if auth := envOr("KIDSOUT_AUTH", envOr("KOAUTH", "")); auth != "" {
+			c := &Client{Base: strings.TrimRight(o.server, "/"), Auth: auth,
+				Timeout: o.timeout, Verbosity: o.verbosity, Log: stderr}
+			ctx, cancel := context.WithTimeout(context.Background(), o.timeout)
+			defer cancel()
+			if info, err := c.GetVersion(ctx); err != nil {
+				fmt.Fprintf(stdout, "server: unavailable (%v)\n", err)
+			} else {
+				fmt.Fprintf(stdout, "server: %s %s (commit %s, %s %s/%s)\n",
+					info.App, info.Version, info.Commit, info.GoVersion, info.OS, info.Arch)
+			}
+		}
 		return 0
 	case "completion":
 		if len(args) != 1 || args[0] != "bash" {
