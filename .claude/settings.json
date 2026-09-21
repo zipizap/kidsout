@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./run_tests.sh)",
+      "Bash(echo \"--- old-key grep exit: $?\")",
+      "Bash(python3 -c \"import json; d=json.load\\(open\\('device.json'\\)\\); print\\(d['state']\\)\")",
+      "Bash(python3 -m py_compile xbox.py test_state.py)",
+      "Bash(git -C /home/paulo/projs/kidsout status --short)",
+      "Bash(python3 -c 'import json; d=json.load\\(open\\('\\\\''/home/paulo/projs/kidsout/devices/xbox/xbox-openwrt-driver/device.json'\\\\''\\)\\); print\\(d['\\\\''state'\\\\'']['\\\\''threshold_out_bytes_per_min'\\\\''], d['\\\\''state'\\\\'']['\\\\''threshold_in_bytes_per_min'\\\\'']\\)')",
+      "Bash(python3 -m py_compile /home/paulo/projs/kidsout/devices/xbox/xbox-openwrt-driver/xbox.py /home/paulo/projs/kidsout/devices/xbox/xbox-openwrt-driver/test_state.py)"
+    ]
+  }
+}

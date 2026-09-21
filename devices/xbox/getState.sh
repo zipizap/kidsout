@@ -2,8 +2,9 @@
 # kidsout xbox: getState.sh — upstream kidsout (Go web app) script contract.
 #
 # Prints ONE word on stdout: up | down | unknown.
-#   up       the console's outbound byte rate is above the threshold in
-#            device.json — someone is actually using it
+#   up       the console's outbound byte rate is above threshold_out in
+#            device.json (gameplay), OR its inbound rate is above threshold_in
+#            (streaming video) — someone is actually using it
 #   down     the router answered and the console is idle (or blocked)
 #   unknown  the router could not be consulted, or there is no usable baseline
 #            (first run after a restart, a stale sample, a counter reset)

@@ -843,10 +843,59 @@ def sample_rate(fw, device, state, now=None):
 # --------------------------------------------------------------------------- #
 # the kidsout contract: state
 # --------------------------------------------------------------------------- #
+def thresholds(cfg_state):
+    """(threshold_out, threshold_in) in bytes/min from device.json -> state.
+
+    threshold_in may be None, which means the inbound rule is off and the
+    verdict is outbound-only (the pre-2026-09-21 behaviour).
+    """
+    return (cfg_state.get("threshold_out_bytes_per_min", 200 * 1024),
+            cfg_state.get("threshold_in_bytes_per_min"))
+
+
+def verdict_for(rate_out, rate_in, cfg_state):
+    """Return ("up" | "down", "out" | "in" | None) for a computed rate pair.
+
+    up when EITHER direction exceeds its threshold (strictly):
+
+        rate_out > threshold_out_bytes_per_min      -> ("up", "out")
+        rate_in  > threshold_in_bytes_per_min       -> ("up", "in")
+        otherwise                                   -> ("down", None)
+
+    Why two directions: gameplay uploads continuously (289-472 KB/min out,
+    calibrated 2026-09-15), but streaming video is almost pure INBOUND -- YouTube
+    measured 2026-09-21 at 60-80 KB/min out against 4.4-18 MB/min in, and read
+    'down' all evening under the outbound-only rule. No outbound threshold can
+    catch it: a background game download produces 93.7 KB/min out, MORE than
+    streaming does, so any line low enough for YouTube also fires on patches and
+    sits next to random ACK bursts. Hence a separate inbound floor.
+
+    The accepted cost: a game download in progress reads 'up' too. That only
+    happens while the console is powered on (it is in Energy-saving mode, so
+    nothing downloads while off), and a false 'up' is loud -- it burns allowance
+    and gets complained about -- whereas a false 'down' is silent unmetered
+    viewing. See DESIGN.md §5.
+    """
+    thr_out, thr_in = thresholds(cfg_state)
+    if rate_out > thr_out:
+        return "up", "out"
+    if thr_in is not None and rate_in > thr_in:
+        return "up", "in"
+    return "down", None
+
+
+def _fmt_thresholds(cfg_state):
+    thr_out, thr_in = thresholds(cfg_state)
+    s = f"threshold_out={thr_out / 1024:.0f}KB/min"
+    s += f" threshold_in={thr_in / 1024:.0f}KB/min" if thr_in is not None else " threshold_in=off"
+    return s
+
+
 def cmd_state(fw, device, _args):
     """Print exactly one of up / down / unknown.
 
-    up      the console's outbound byte rate is above the threshold
+    up      the console's outbound byte rate is above threshold_out, OR its
+            inbound rate is above threshold_in (streaming) -- see verdict_for()
     down    the router answered and the console is idle (or blocked)
     unknown the router could not be consulted, or there is no usable baseline
 
@@ -856,7 +905,6 @@ def cmd_state(fw, device, _args):
     """
     st = load_state()
     cfg_state = device.get("state", {})
-    threshold = cfg_state.get("threshold_bytes_per_min", 200 * 1024)
 
     try:
         try:
@@ -877,10 +925,11 @@ def cmd_state(fw, device, _args):
             log(f"state=unknown reason={reason}")
             return 0
 
-        verdict = "up" if rate_out > threshold else "down"
+        verdict, by = verdict_for(rate_out, rate_in, cfg_state)
         print(verdict)
-        log(f"state={verdict} out={rate_out / 1024:.1f}KB/min in={rate_in / 1024:.1f}KB/min "
-            f"threshold={threshold / 1024:.0f}KB/min")
+        log(f"state={verdict}{' by=' + by if by else ''} "
+            f"out={rate_out / 1024:.1f}KB/min in={rate_in / 1024:.1f}KB/min "
+            f"{_fmt_thresholds(cfg_state)}")
         _periodic_rule_audit(fw, device, st, verdict)
         return 0
 
@@ -1093,13 +1142,14 @@ def cmd_status(fw, device, _args):
     try:
         rate_out, rate_in, reason = sample_rate(fw, device, st)
         save_state(st)
-        threshold = device.get("state", {}).get("threshold_bytes_per_min", 200 * 1024)
+        cfg_state = device.get("state", {})
         if reason:
             print(f"traffic  : no rate available — {reason}")
         else:
-            verdict = "up" if rate_out > threshold else "down"
+            verdict, by = verdict_for(rate_out, rate_in, cfg_state)
             print(f"traffic  : out={rate_out / 1024:.1f} KB/min  in={rate_in / 1024:.1f} KB/min  "
-                  f"threshold={threshold / 1024:.0f} KB/min  -> {verdict}")
+                  f"{_fmt_thresholds(cfg_state)}  -> {verdict}"
+                  f"{' (by ' + by + ')' if by else ''}")
     except CountersMissing:
         print("traffic  : counters NOT INSTALLED (run './xbox.py install')")
     except Exception as e:
@@ -1281,9 +1331,13 @@ def cmd_calibrate(fw, device, args):
         print("\ninterrupted")
 
     if rows:
-        outs = sorted(r["out_kb_min"] for r in rows)
-        print(f"\n{label}: n={len(outs)}  min={outs[0]:.1f}  "
-              f"median={outs[len(outs) // 2]:.1f}  max={outs[-1]:.1f} KB/min")
+        # Both directions: outbound picks threshold_out_bytes_per_min (play vs
+        # idle/download), inbound picks threshold_in_bytes_per_min (streaming
+        # vs idle). See DESIGN.md §5.
+        for key, name in (("out_kb_min", "out"), ("in_kb_min", "in ")):
+            vals = sorted(r[key] for r in rows)
+            print(f"\n{label} {name}: n={len(vals)}  min={vals[0]:.1f}  "
+                  f"median={vals[len(vals) // 2]:.1f}  max={vals[-1]:.1f} KB/min")
     return 0
 
 

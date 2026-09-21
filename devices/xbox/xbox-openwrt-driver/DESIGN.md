@@ -198,15 +198,22 @@ error message on the console.
 
 `getState.sh` prints one word: `up`, `down` or `unknown`.
 
-The signal is the console's **outbound byte rate**, compared against
-`device.json` → `state.threshold_bytes_per_min`:
+The signal is the console's byte rate in **either direction**, each compared
+against its own threshold in `device.json` → `state`:
 
 ```
-rate = (xbox_out(now) - xbox_out(prev)) / (now - prev) * 60
-up      rate >  threshold
-down    rate <= threshold
+rate_out = (xbox_out(now) - xbox_out(prev)) / (now - prev) * 60
+rate_in  = (xbox_in(now)  - xbox_in(prev))  / (now - prev) * 60
+up      rate_out > threshold_out_bytes_per_min      (gameplay uploads)
+     or rate_in  > threshold_in_bytes_per_min       (streaming video)
+down    neither
 unknown the rate is not computable — see below
 ```
+
+Outbound alone was the rule until 2026-09-21, when an evening of YouTube read
+`down` on every tick; §5 explains why a second, inbound threshold was the only
+fix and what it costs. Setting `threshold_in_bytes_per_min` to `null` restores
+the outbound-only rule.
 
 ### The bytes come from conntrack, not from an nft counter
 
@@ -290,17 +297,23 @@ that deadline, measured with the timeouts from the **shipped**
 
 ## 5. Calibration
 
-The threshold is **measured, not guessed**. Against the real console on WiFi:
+Both thresholds are **measured, not guessed**. Against the real console on WiFi:
 
-| state | outbound | inbound | verdict @ 200 KB/min |
+| state | outbound | inbound | verdict @ out 200 KB/min, in 1 MB/min |
 |---|---|---|---|
-| idle / dashboard | **20.8** KB/min | 23 KB/min | DOWN ✓ |
-| downloading | **93.7** KB/min | 11.8 MB/min | DOWN ✓ |
-| gaming (measured twice) | **289.5** / **471.6** KB/min | — | **UP** ✓ |
-| blocked | **3.0** KB/min | 8.2 KB/min | DOWN ✓ |
+| idle / dashboard | **20.8** KB/min | **23** KB/min | DOWN ✓ |
+| downloading | **93.7** KB/min | **11.8** MB/min | UP (by inbound — accepted, see below) |
+| gaming (measured twice) | **289.5** / **471.6** KB/min | — | **UP** ✓ (by outbound) |
+| streaming YouTube (2026-09-21, 60 s ticks) | **60–80** KB/min | **4.4–18** MB/min | **UP** ✓ (by inbound) |
+| blocked | **3.0** KB/min | **8.2** KB/min | DOWN ✓ |
 
-**Chosen threshold: `204800` bytes/min (200 KB/min).** It sits between
+**Outbound threshold: `204800` bytes/min (200 KB/min).** It sits between
 downloading and gaming with ≥3× separation either side.
+
+**Inbound threshold: `1048576` bytes/min (1 MB/min).** 45× above the idle
+dashboard, 4× below the slowest streaming tick observed. It is deliberately low
+enough to catch low-bitrate video and music streaming (~1.2 MB/min) — the
+failure mode that matters is a false `down`, which is silent unmetered viewing.
 
 Every figure was cross-validated against `iwinfo assoclist` — mac80211's own
 per-station byte counters, wholly independent of netfilter and of the offload
@@ -309,32 +322,57 @@ outbound. The outbound gap is expected and is not an error: outbound is dominate
 by small TCP ACKs, and iwinfo counts whole 802.11 frames where conntrack counts
 L3 payload. What matters is that the two move together.
 
-### A background download does not read as "in use"
+### Why there is an inbound threshold, and what it costs
 
-An earlier concern was that byte rate could not tell playing from downloading,
-so a background game update would burn the daily allowance. **Measured, it does
-not.** During a 12 MB/min download the outbound stream was 93.7 KB/min — about
-0.8 % of downstream, well under the threshold. The metric being *outbound-only*
-is what saves it.
+The first shipped rule was outbound-only, and for a reason: during a 12 MB/min
+game download the outbound stream was 93.7 KB/min — 0.8 % of downstream and well
+under 200 KB/min — so a background update did not burn the allowance. That was
+measured and correct.
 
-That is a property of this console and this threshold, not a law. If it ever
-changes, the fallbacks are to set the console to Energy-Saving power mode (which
-stops background downloads while off) or to schedule updates overnight.
+It was also the reason **streaming video read `down`**. On 2026-09-21 the console
+played YouTube for a quarter of an hour and every 60 s tick logged
+`state=down out=60–80KB/min in=4.4–18MB/min`. Streaming is pure inbound plus
+TCP acknowledgements; its outbound rate is *lower* than a download's. So no
+outbound threshold can separate the two: a line low enough for YouTube also
+fires on every patch, and sits right next to random ACK bursts (single ticks of
+`out=406` and `out=1372` appear in the same log), so it would flap constantly.
+The metric had to change, not the number.
+
+The inbound rule therefore trades one known false `down` for one known false
+`up`: **a game download in progress now reads `up`.** That was accepted
+deliberately —
+
+- a false `up` burns allowance and gets noticed and complained about; a false
+  `down` is silent, and the allowance never decrements while the video plays;
+- the console is in **Energy-saving (Shutdown) power mode**, so nothing downloads
+  while it is off. A download can only read `up` while somebody has switched the
+  console on, which is a fair reading of "in use" for a child's allowance.
+
+If the power mode is ever changed to Instant-on, standby updates will burn
+allowance overnight. Either keep Energy-saving, or see §13 Q6 for the per-flow
+discrimination that would remove the trade-off altogether.
 
 ### Re-calibrating
 
 ```
 ./xbox.py calibrate --minutes 30 --interval 60 --label standby
 ./xbox.py calibrate --minutes 10 --interval 60 --label gaming
+./xbox.py calibrate --minutes 10 --interval 60 --label streaming
 ```
 
 Samples append to `calibration.jsonl`; each run prints n / min / median / max in
-KB/min. Pick comfortably above the standby maximum and comfortably below the
-gaming minimum — geometric midpoint is a reasonable default. Write it to
-`device.json` → `state.threshold_bytes_per_min` **in bytes**.
+KB/min for **both** directions. Use `--interval 60` — that is kidsout's tick,
+and short windows alias badly against bursty ACK traffic.
 
-The threshold is the only tunable; nothing else needs to change. Re-calibrate if
-the console moves to ethernet, since the measurements above are from WiFi.
+- **Outbound** (`threshold_out_bytes_per_min`): pick comfortably above the
+  standby maximum and comfortably below the gaming minimum — geometric midpoint
+  is a reasonable default.
+- **Inbound** (`threshold_in_bytes_per_min`): pick comfortably above the standby
+  *inbound* maximum and comfortably below the streaming *inbound* minimum. Err
+  low: a missed stream is silent, an over-eager `up` is not.
+
+Write both to `device.json` → `state` **in bytes**. Re-calibrate if the console
+moves to ethernet, since the measurements above are from WiFi.
 
 ---
 
@@ -477,7 +515,10 @@ fails open whenever the console is using it.
 
 ### 5. Calibrate
 
-Follow §5. The shipped 200 KB/min is correct for this console on WiFi.
+Follow §5. The shipped 200 KB/min outbound and 1 MB/min inbound are correct for
+this console on WiFi. Make sure the console's power mode is **Energy-saving**
+(Settings → General → Power options) — with Instant-on, standby downloads would
+read `up` overnight.
 
 ### 6. Deploy
 
@@ -720,6 +761,23 @@ with `src` and no `dest` to block input DNS too.
 Everything here assumes one console. A second would need its own device
 directory, its own rpcd ACL entry or a shared one, and its own accumulator state
 file — the helper currently keeps exactly one.
+
+**Q6 — Telling a download from a stream.**
+By byte rate alone they are the same thing (§5), which is why a download now
+reads `up`. They differ per flow: Xbox content downloads historically go to
+Microsoft CDNs, often over plain TCP/80, while video is TCP/443 or QUIC (UDP/443)
+to Google/Netflix/etc. The `counters` helper already walks every conntrack
+tuple, so bucketing inbound bytes by destination port or protocol is a small
+change router-side — but it needs a measurement session with a real game update
+running before any threshold could be written, and it is only worth doing if the
+Energy-saving power mode stops being enough.
+
+**Q7 — Debounce.**
+The verdict has no hysteresis: one 60 s window decides. The 2026-09-21 log shows
+isolated `up` ticks from ACK bursts (`out=406.6` in the middle of an otherwise
+sub-threshold stream) and a near miss at `out=191.1`. Requiring two consecutive
+ticks would trade one minute of latency for a steadier reading. Not done — a
+one-tick flap costs one minute of allowance either way.
 
 ---
 

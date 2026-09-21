@@ -13,6 +13,21 @@ Categories: `Added`, `Changed`, `Fixed`, `Removed`, `Security`, `Docs`.
 
 ## [Unreleased]
 
+### Fixed
+- Xbox driver reported `down` while the console was streaming video (YouTube:
+  60–80 KB/min out, 4.4–18 MB/min in, against an outbound-only 200 KB/min
+  rule). `state` now also reads `up` when the **inbound** rate exceeds a new
+  `threshold_in_bytes_per_min` (shipped at 1 MB/min). Accepted trade-off: a
+  game download in progress also reads `up`; the console's Energy-saving power
+  mode confines that to console-on time. The log line now names which rule
+  fired (`by=out` / `by=in`) and both thresholds.
+
+### Changed
+- Xbox `device.json`: `state.threshold_bytes_per_min` renamed to
+  `threshold_out_bytes_per_min` (same value, no alias — update any local copy).
+- Xbox `status` shares the verdict logic with `state`; `calibrate` summarises
+  inbound as well as outbound.
+
 ### In progress
 - Tablet device driver (`devices/TODO/tablet/`): contract scripts stubbed,
   no implementation yet.

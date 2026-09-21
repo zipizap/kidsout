@@ -67,28 +67,27 @@ not to a device, so it needs no change at all.
 
 This is the crux, and it is not a threshold to retune.
 
-> The Xbox metric is **outbound** byte rate, deliberately. Measured on the real
+> The Xbox metric was **outbound** byte rate, deliberately. Measured on the real
 > console: idle 20.8, downloading 93.7, gaming 289.5–471.6 KB/min *outbound*. A
 > download is almost pure inbound; gameplay uploads continuously. That asymmetry
 > is what lets one number separate "playing" from "patching" with 3.1× margin.
 
-An Android tablet inverts both cases:
+**Update 2026-09-21:** the first row below turned out to apply to the Xbox too —
+YouTube on the console read `down` for an evening. The fix that landed is a
+second, independent **inbound** threshold (`threshold_out_bytes_per_min` +
+`threshold_in_bytes_per_min`, OR-ed, in `verdict_for()`), not a `metric` enum;
+see DESIGN.md §4–§5 for the accepted cost (a download now reads `up`).
+
+An Android tablet still inverts the *second* case:
 
 | Situation | Tablet traffic | Xbox metric says | Truth |
 |---|---|---|---|
-| Kid watching YouTube for two hours | huge **in**, trivial **out** | `down` | in use |
+| Kid watching YouTube for two hours | huge **in**, trivial **out** | `up` (since 2026-09-21) | in use |
 | Overnight photo backup or OS update | large **out** | `up` | nobody touching it |
 
-So a tablet does not want a different threshold on the same metric — it wants a
-**different metric**, probably total (in + out) against a low standby floor.
-
-That is a genuinely small code change: something like
-
-```json
-"state": { "metric": "out_rate" | "total_rate", "threshold_bytes_per_min": N }
-```
-
-plus a branch in `sample_rate()`. Perhaps 30 lines.
+So a tablet does not want the Xbox's numbers — it needs its own two thresholds,
+and probably a much lower outbound one is *wrong* for it (backups). The
+two-threshold shape is already generic; what does not generalise is the values.
 
 **The cost is not the code — it is that every new device class needs its own
 empirical calibration.** The Xbox's numbers took a session of real gameplay,

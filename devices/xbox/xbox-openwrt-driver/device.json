@@ -20,10 +20,11 @@
     "_comment": "ubus_path_candidates was trimmed to the one path that answers: /cgi-bin/luci/rpc/ubus is luci-mod-rpc, a different API, and 404s here. tls_sha256 is set by './xbox.py pin'."
   },
   "state": {
-    "threshold_bytes_per_min": 204800,
+    "threshold_out_bytes_per_min": 204800,
+    "threshold_in_bytes_per_min": 1048576,
     "max_sample_age_s": 300,
     "rule_audit_period_s": 900,
-    "_comment": "'up' means the console's outbound byte rate exceeded threshold_bytes_per_min since the previous sample. CALIBRATED 2026-09-15 against the real console: idle 20.8 KB/min, downloading 93.7 KB/min, gaming 289.5 KB/min outbound - so 200 KB/min separates play from download with 3.1x margin. Bytes come from conntrack accounting, accumulated router-side into a monotonic total; nft counters cannot be used because this router offloads flows in hardware and they would never see the traffic (REVIEW.2 G-01/G-04). A sample older than max_sample_age_s is discarded as stale rather than averaged over the gap."
+    "_comment": "'up' means that since the previous sample EITHER the console's outbound byte rate exceeded threshold_out_bytes_per_min OR its inbound rate exceeded threshold_in_bytes_per_min (set it to null to go back to outbound-only). OUTBOUND CALIBRATED 2026-09-15 against the real console: idle 20.8 KB/min, downloading 93.7 KB/min, gaming 289.5 KB/min - so 200 KB/min separates play from download with 3.1x margin. INBOUND CALIBRATED 2026-09-21 while streaming YouTube: 60-80 KB/min out (below the outbound line, so it read 'down' all evening) against 4.4-18 MB/min in; idle dashboard is 23 KB/min in - so 1 MB/min sits 45x above idle and 4x below the slowest streaming tick. Accepted trade-off: a game download in progress (11.8 MB/min in) now also reads 'up'; the console is in Energy-saving power mode so that can only happen while somebody has switched it on. Bytes come from conntrack accounting, accumulated router-side into a monotonic total; nft counters cannot be used because this router offloads flows in hardware and they would never see the traffic (REVIEW.2 G-01/G-04). A sample older than max_sample_age_s is discarded as stale rather than averaged over the gap."
   },
   "rules": {
     "prefix": "kidsout_xbox",

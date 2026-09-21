@@ -66,7 +66,7 @@ if [ "$DO" -le 0 ]; then
 else
   echo "RESULT  : outbound ~$((DO * 60 / DT)) bytes/min (~$((DO * 60 / DT / 1024)) KB/min)"
   echo "          inbound  ~$((DI * 60 / DT)) bytes/min (~$((DI * 60 / DT / 1024)) KB/min)"
-  echo "          device.json threshold_bytes_per_min is currently 204800 (200 KB/min)"
+  echo "          device.json threshold_out_bytes_per_min is currently 204800 (200 KB/min)"
 fi
 
 s B2.5 INTERFACE THROUGHPUT CROSS-CHECK '(the honest denominator)'
