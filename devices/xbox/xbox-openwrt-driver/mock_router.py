@@ -18,7 +18,7 @@ failure-mode claim in the docs go unverified — it can be told to fail:
     mock.state.fail = "denied"        accept the login, deny every call (ACL)
     mock.state.fail = "execfail"      helper returns a non-zero exit code
     mock.state.fail = "nocounters"    helper reports the accounting table missing
-    mock.state.fail = "noconntrack"   helper reports conntrack-tools missing
+    mock.state.fail = "noconntrack"   helper reports the conntrack CLI missing
     mock.state.slow = 5.0             delay every response by N seconds
 
 Use as a library (preferred, for tests):
@@ -152,7 +152,7 @@ def helper_exec(st, params):
 
     if verb == "flush":
         if st.fail == "noconntrack":
-            return {"code": 3, "stdout": "", "stderr": "conntrack-tools not installed"}
+            return {"code": 3, "stdout": "", "stderr": "conntrack CLI not installed (opkg install conntrack)"}
         if not args:
             return {"code": 2, "stdout": "", "stderr": "flush needs at least one address"}
         st.flushed.append(list(args))

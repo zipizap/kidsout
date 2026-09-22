@@ -709,8 +709,9 @@ def flush_conntrack(fw, device):
         return True, detail or f"flushed {' '.join(addrs)}"
     except UbusError as e:
         log(f"ERROR: conntrack flush failed: {e}")
-        return False, (f"NOT flushed ({e}). Install conntrack-tools on the router "
-                       f"('opkg install conntrack-tools' or 'apk add conntrack-tools'), "
+        return False, (f"NOT flushed ({e}). Install the 'conntrack' package on the "
+                       f"router ('opkg install conntrack' or 'apk add conntrack' — "
+                       f"the package is 'conntrack', not 'conntrack-tools'), "
                        f"otherwise a session already in progress survives the block.")
 
 
@@ -1059,10 +1060,11 @@ def cmd_selftest(fw, device, _args):
         problems = []
         if facts.get("conntrack_tools") != "yes":
             problems.append(
-                "conntrack-tools is NOT installed. With flow offloading on, an "
+                "the 'conntrack' CLI is NOT installed. With flow offloading on, an "
                 "in-progress session is forwarded in hardware and never reaches "
                 "the REJECT rule, so flushing its conntrack entry is the only "
-                "way to cut it. Fix: opkg update && opkg install conntrack-tools")
+                "way to cut it. Fix: opkg update && opkg install conntrack "
+                "(the package is 'conntrack', not 'conntrack-tools')")
         if facts.get("flowtable_counter") == "NO":
             problems.append(
                 "the fw4 flowtable has no 'counter' flag, so offloaded flows do "
@@ -1070,7 +1072,7 @@ def cmd_selftest(fw, device, _args):
                 "under-report badly. Fix: disable flow offloading, or upgrade fw4")
         if problems:
             raise UbusError(" | ".join(problems))
-        return (f"conntrack-tools present; flowtable counter="
+        return (f"conntrack CLI present; flowtable counter="
                 f"{facts.get('flowtable_counter')}, hw={facts.get('flowtable_hw')}")
     check("enforcement preconditions", enforcement_preconditions)
 
@@ -1187,6 +1189,9 @@ def cmd_check(fw, device, _args):
     hits = [r.strip() for r in rows
             if any(m in r.lower() for m in macs)
             or any(r.startswith(ip + " ") for ip in ips)]
+    # 'ip neigh show' already lists IPv6 rows, and the helper follows it with
+    # 'ip -6 neigh show', so every IPv6 neighbour arrives twice. Show each once.
+    hits = list(dict.fromkeys(hits))
     if not hits:
         print(f"console: NOT present in the router's neighbour table "
               f"(macs={', '.join(macs) or 'none'} "

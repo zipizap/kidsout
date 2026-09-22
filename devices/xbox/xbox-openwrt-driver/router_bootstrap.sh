@@ -275,7 +275,7 @@ counters-remove)
 	;;
 
 flush)
-	have conntrack || { echo "conntrack-tools not installed" >&2; exit 3; }
+	have conntrack || { echo "conntrack CLI not installed (opkg install conntrack)" >&2; exit 3; }
 	[ $# -gt 0 ] || { echo "flush needs at least one address" >&2; exit 2; }
 	# Count ENTRIES actually destroyed, not commands that succeeded. conntrack
 	# reports "N flow entries have been deleted." on stderr; summing that is
@@ -294,8 +294,9 @@ flush)
 	;;
 
 neigh)
+	# 'ip neigh show' already covers both families; adding 'ip -6 neigh show'
+	# listed every IPv6 neighbour twice.
 	ip neigh show 2>/dev/null
-	ip -6 neigh show 2>/dev/null
 	;;
 
 leases)
@@ -419,21 +420,21 @@ say "rpcd login '$RPCD_USER' written to /etc/config/rpcd"
 sleep 1
 
 # --------------------------------------------------------------------------- #
-# 4. conntrack-tools
+# 4. conntrack CLI (OpenWrt package 'conntrack' — NOT 'conntrack-tools', which does not exist)
 # --------------------------------------------------------------------------- #
 # Without it the block cannot cut a session already in progress: fw4's forward
 # chain accepts established flows before any user rule, and this router's
 # established-TCP timeout is 7440 s. "Blocked" would mean "blocked within two
 # hours" for whoever is already mid-game.
 if command -v conntrack >/dev/null 2>&1; then
-	say "conntrack-tools already installed"
+	say "conntrack CLI already installed"
 else
-	say "installing conntrack-tools (needed to cut in-progress sessions)"
+	say "installing package conntrack (needed to cut in-progress sessions)"
 	opkg update >/dev/null 2>&1 || say "warning: opkg update failed"
 	if opkg install conntrack >/dev/null 2>&1; then
-		say "conntrack-tools installed"
+		say "conntrack installed"
 	else
-		say "WARNING: could not install conntrack-tools. Blocking will still stop"
+		say "WARNING: could not install package conntrack. Blocking will still stop"
 		say "         NEW connections, but a game already running survives for up"
 		say "         to 2 hours. Install it by hand, then re-run ./xbox.py selftest."
 	fi

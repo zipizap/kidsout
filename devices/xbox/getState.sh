@@ -13,7 +13,7 @@
 # in Instant-On standby, so counting flows reports 'up' around the clock and
 # burns the whole daily allowance while nobody is playing. See REVIEW.1 F-06.
 #
-# Runtime: bounded by state_deadline in config.json (default 7s), inside
+# Runtime: bounded by state_deadline in config.json (default 4s), inside
 # kidsout's 10s limit. Typical healthy run is well under a second; the driver
 # returns a truthful 'unknown' rather than being SIGKILLed.
 #

@@ -22,6 +22,19 @@ Categories: `Added`, `Changed`, `Fixed`, `Removed`, `Security`, `Docs`.
   mode confines that to console-on time. The log line now names which rule
   fired (`by=out` / `by=in`) and both thresholds.
 
+- Xbox driver: operator messages told you to `opkg install conntrack-tools`,
+  a package that does not exist on OpenWrt. They now name the real package,
+  `conntrack`. `getState.sh`'s header claimed a 7 s deadline; the shipped
+  default is 4 s. `check` listed every IPv6 neighbour twice because the router
+  helper ran both `ip neigh show` and `ip -6 neigh show`; the driver now
+  de-duplicates and the helper drops the redundant call.
+
+### Docs
+- Xbox driver: live test session against the real router and console recorded
+  in `devices/xbox/xbox-openwrt-driver/Tests.20260922.124049.md` — every
+  contract path (idle, gaming, streaming, block/unblock, failure modes,
+  power-off) passed; ethernet not covered.
+
 ### Changed
 - Xbox `device.json`: `state.threshold_bytes_per_min` renamed to
   `threshold_out_bytes_per_min` (same value, no alias — update any local copy).
