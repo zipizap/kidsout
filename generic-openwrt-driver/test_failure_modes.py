@@ -3,7 +3,7 @@
 
 v1 could not emit `unknown` at all — `_conntrack_flows` swallowed every
 exception and returned [], which read as "no traffic", which printed `down`
-(REVIEW.1 F-02). A router outage, a typo'd password and a quiet console were
+(REVIEW.1 F-02). A router outage, a typo'd password and a quiet device were
 indistinguishable, which permanently blinded kidsout's state-history strip.
 
 v1 also took 61 s to fail, against a 10 s contract timeout, because the
@@ -17,8 +17,8 @@ import sys
 import time
 
 from mock_router import MockRouter
-from testlib import (Suite, captured, device, load_driver, out_of, shipped_config,
-                     tmpdir)
+from testlib import (TEST_ID, Suite, captured, device, load_driver, out_of,
+                     shipped_config, tmpdir)
 
 # TEST-NET-1 (RFC 5737): reserved for documentation, black-holes by design.
 BLACKHOLE = "192.0.2.1"
@@ -37,7 +37,7 @@ def main():
     ship = shipped_config()
     budget = ship["state_deadline"] + 1.0
 
-    with tmpdir() as tmp, MockRouter() as mock:
+    with tmpdir() as tmp, MockRouter(device_id=TEST_ID) as mock:
         m = load_driver(tmp)
         dev = device()
 
@@ -46,7 +46,7 @@ def main():
             cfg = dict(ship)
             cfg.pop("password", None)
             cfg.update({"host": "127.0.0.1", "port": mock.port,
-                        "username": "kidsout", "password": mock.state.password})
+                        "username": mock.state.username, "password": mock.state.password})
             cfg.update(cfg_over or {})
             d = dev_over or dev
             fw = m.Router(cfg, d, timeout=cfg["state_timeout"],
@@ -58,6 +58,13 @@ def main():
 
         with captured():
             m.cmd_install(m.Router(mock.config(), dev), dev, None)
+
+        with s.case("the shipped config's null username means kidsout-<id>") as c:
+            cfg = dict(ship)
+            cfg.update({"host": "127.0.0.1", "port": mock.port, "password": mock.state.password})
+            fw = m.Router(cfg, dev)
+            c.eq(fw.username, f"kidsout-{TEST_ID}", "derived from the id")
+            c.check(fw.login(), "and the mock accepts it")
 
         cases = [
             ("router unreachable (black-holed address)",
@@ -138,6 +145,33 @@ def main():
             word, rc, _ = run()
             c.eq(word, "down", "blocked and silent reads as down, not unknown")
             c.eq(rc, 0, "exit 0")
+
+        # ---- a half-edited device.json must be refused, not half-obeyed --- #
+        with s.case("device.json with a bad id is refused") as c:
+            import json, os
+            for bad in ("Xbox", "nintendo_switch", "my-device", "", None, 7):
+                path = os.path.join(tmp, "bad.json")
+                with open(path, "w") as f:
+                    json.dump(device(id="testdev") | {"id": bad}, f)
+                try:
+                    m.load_device(path)
+                    c.check(False, f"id {bad!r} should have been refused")
+                except SystemExit as e:
+                    c.check("'id'" in str(e), f"{bad!r}: message names the field: {e}")
+
+        with s.case("device.json with a stale rules.prefix from another device is refused") as c:
+            import json, os
+            path = os.path.join(tmp, "stale.json")
+            with open(path, "w") as f:
+                json.dump(device(id="second") | {"rules": {"prefix": "kidsout_testdev"}}, f)
+            try:
+                m.load_device(path)
+                c.check(False, "should have been refused")
+            except SystemExit as e:
+                c.check("another device" in str(e), f"explains the danger: {e}")
+            with open(path, "w") as f:
+                json.dump(device(id="second") | {"rules": {"prefix": "kidsout_second"}}, f)
+            c.eq(m.load_device(path)["id"], "second", "a matching prefix is accepted")
 
     return s.report()
 

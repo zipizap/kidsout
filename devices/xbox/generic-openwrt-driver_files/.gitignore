@@ -1,0 +1,6 @@
+# per-device runtime files written by the shared generic-openwrt-driver
+config.json
+.state.json
+.state.json.tmp
+driver.log
+calibration.jsonl

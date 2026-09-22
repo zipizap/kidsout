@@ -338,8 +338,18 @@ handle=$(sudo nft -a list chain inet filter forward \
 exit 0
 ```
 
-> The bundled `devices/{tv,xbox,tablet}` are **demo stubs**: they track state with a
+> The `devices.example.tgz` bundle contains **demo stubs**: they track state with a
 > local `.blocked` marker file instead of touching a real device. Use them as a template.
+
+### Any device behind an OpenWrt router
+
+For a real device on a LAN with an OpenWrt router, use the shared
+[`generic-openwrt-driver/`](generic-openwrt-driver/README.md) instead of writing
+scripts: it blocks by toggling a per-device firewall rule (plus a conntrack
+flush so in-progress sessions actually stop) and reports `up`/`down` from the
+device's byte rate. `generic-openwrt-driver/new_device.sh <name>` scaffolds
+`devices/<name>/`; the README there lists the admin steps. `devices/xbox/` is
+a live example.
 
 ---
 

@@ -1,8 +1,12 @@
 # Future ideas — generalising the driver beyond the Xbox
 
-**Status: hypothesis, not a plan.** Nothing here has been built or measured.
-Written 2026-09-15 from a design discussion; the implemented, verified design is
-[xbox-openwrt-driver/DESIGN.md](xbox-openwrt-driver/DESIGN.md).
+**Status: superseded on 2026-09-22.** The generalisation happened, as
+[`generic-openwrt-driver/`](../../../generic-openwrt-driver/README.md): one
+shared driver, per-device `devices/<name>/generic-openwrt-driver_files/`, and a
+**per-device** router helper / ACL / login named after the device id (not the
+single shared helper with a device-id argument proposed below). Layer 3 — that
+every device class needs its own empirical calibration — stands. Kept as the
+record of the discussion; written 2026-09-15.
 
 ---
 

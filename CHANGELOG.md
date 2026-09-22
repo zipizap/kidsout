@@ -13,6 +13,43 @@ Categories: `Added`, `Changed`, `Fixed`, `Removed`, `Security`, `Docs`.
 
 ## [Unreleased]
 
+### Added
+- **`generic-openwrt-driver/`**: the Xbox OpenWrt driver generalised into one
+  shared driver for any device behind an OpenWrt router. Each device keeps only
+  its own facts under `devices/<name>/generic-openwrt-driver_files/`
+  (`device.json`, `config.json`, runtime files) plus the three contract
+  wrappers; the code lives once at the repo root. Everything on the router is
+  namespaced by the device id (`kidsout_<id>_out`, `/usr/libexec/kidsout-<id>`,
+  ACL and login `kidsout-<id>`, `/tmp/kidsout-<id>.*`), so several devices
+  share one router without interfering. `new_device.sh <name>` scaffolds a
+  device; `README.md` there is the admin guide.
+- `router_bootstrap.sh <id> --helper-only` refreshes the helper and ACL
+  without a password prompt and without resetting the accumulator.
+- Offline suite: `test_two_devices.py` (two devices, one a prefix of the
+  other, against one multi-tenant mock) and a check that every real
+  `devices/*/` directory matches the wrapper templates and has a valid
+  `device.json`.
+
+### Changed
+- `devices/xbox/xbox-openwrt-driver/` is gone: code moved to
+  `generic-openwrt-driver/` (`xbox.py` → `driver.py`, `xbox.log` →
+  `driver.log`), device facts to
+  `devices/xbox/generic-openwrt-driver_files/`, measurements and printouts to
+  `devices/xbox/other/`; `devices/xbox/README.md` holds the Xbox specifics and
+  the router migration steps (login `kidsout` → `kidsout-xbox`).
+- Helper counter keys are `out`/`in`; the driver still accepts the old
+  `xbox_out`/`xbox_in` from a not-yet-refreshed helper and asks for
+  `--helper-only` in the log. A stored sample with old key names re-baselines
+  (`unknown`) instead of producing one huge false `up`.
+- `device.json`: `id` is validated (`^[a-z][a-z0-9]{0,23}$`, must equal the
+  directory name); `rules.prefix` is derived from it and an explicit
+  disagreeing value is refused; new optional `discover.hostname_hints`.
+
+### Fixed
+- Firewall section matching used a bare prefix, so a device named `kid` would
+  have deleted or toggled `kid2`'s rule. Sections now match on `kidsout_<id>_`.
+- Bootstrap gave every device's system user uid 6000; now the first free uid.
+
 ### Fixed
 - Xbox driver reported `down` while the console was streaming video (YouTube:
   60–80 KB/min out, 4.4–18 MB/min in, against an outbound-only 200 KB/min
@@ -31,7 +68,7 @@ Categories: `Added`, `Changed`, `Fixed`, `Removed`, `Security`, `Docs`.
 
 ### Docs
 - Xbox driver: live test session against the real router and console recorded
-  in `devices/xbox/xbox-openwrt-driver/Tests.20260922.124049.md` — every
+  in `devices/xbox/other/Tests.20260922.124049.md` — every
   contract path (idle, gaming, streaming, block/unblock, failure modes,
   power-off) passed; ethernet not covered.
 

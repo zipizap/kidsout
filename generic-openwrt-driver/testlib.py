@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Shared scaffolding for the offline test suite.
 
-Loads xbox.py as a module with its on-disk state redirected into a temp
-directory, so tests never touch the real device.json, .state.json or xbox.log.
+Loads driver.py as a module with its per-device directory pointed at a temp
+directory, so tests never touch any real device.json, .state.json or
+driver.log.
 """
 import contextlib
 import importlib.util
@@ -15,41 +16,57 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
+# The id every fixture uses unless told otherwise. Deliberately NOT a real
+# device name, so a test can never be mistaken for a run against production.
+TEST_ID = "testdev"
+
 
 def load_driver(tmp):
-    spec = importlib.util.spec_from_file_location("xbox_under_test",
-                                                  os.path.join(HERE, "xbox.py"))
+    spec = importlib.util.spec_from_file_location("driver_under_test",
+                                                  os.path.join(HERE, "driver.py"))
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
-    m.DEVICE_FILE = os.path.join(tmp, "device.json")
-    m.CONFIG_FILE = os.path.join(tmp, "config.json")
-    m.STATE_FILE = os.path.join(tmp, ".state.json")
-    m.LOG_FILE = os.path.join(tmp, "xbox.log")
+    m.set_device_dir(tmp)
     return m
 
 
-def device(mac="aa:bb:cc:dd:ee:ff", macs=None, ipv4="192.168.2.172", **over):
-    """The shipped device.json, with the console's interface(s) filled in.
+def device(mac="aa:bb:cc:dd:ee:ff", macs=None, ipv4="192.168.2.172", id=TEST_ID, **over):
+    """A self-contained device.json for the tests.
 
-    `interfaces` is what the driver actually reads, so it must be set here or
-    the fixture would be silently ignored in favour of the shipped file's real
-    MACs. Pass `macs=[...]` to model a console with both a wired and a wireless
-    interface (REVIEW.2 G-02).
+    Built in code rather than loaded from disk: the shared template ships
+    only device.example.json (placeholders), and each real device's
+    device.json carries its own calibrated thresholds -- the suite must not
+    depend on either. Thresholds are pinned here; the state tests derive
+    their inputs from these numbers.
+
+    Pass `macs=[(mac, ipv4, link), ...]` to model a device with both a wired
+    and a wireless interface (REVIEW.2 G-02).
     """
-    with open(os.path.join(HERE, "device.json")) as f:
-        d = json.load(f)
+    d = {
+        "id": id,
+        "display_name": f"{id} (test fixture)",
+        "network": {"zone": "lan", "wan_zone": "wan"},
+        "router": {
+            "primary_host": "127.0.0.1",
+            "alt_hosts": [],
+            "https_port": 443,
+            "http_port": 80,
+            "ubus_path_candidates": ["/ubus"],
+            # never a pin: the mock serves its own self-signed cert
+            "tls_sha256": None,
+        },
+        "state": {
+            "threshold_out_bytes_per_min": 204800,
+            "threshold_in_bytes_per_min": 1048576,
+            "max_sample_age_s": 300,
+            "rule_audit_period_s": 900,
+        },
+        "discover": {"hostname_hints": [id]},
+    }
     if macs:
-        d["interfaces"] = [{"mac": m, "ipv4": ip, "link": lk}
-                           for m, ip, lk in macs]
+        d["interfaces"] = [{"mac": m, "ipv4": ip, "link": lk} for m, ip, lk in macs]
     else:
         d["interfaces"] = [{"mac": mac, "ipv4": ipv4, "link": "?"}]
-    # Drop any real router pin: device.json carries the production
-    # certificate fingerprint once ./xbox.py pin has been run, and the mock
-    # serves its own self-signed cert, so an inherited pin would (correctly)
-    # refuse to send credentials and fail every suite.
-    d.setdefault("router", {})
-    d["router"] = dict(d["router"])
-    d["router"]["tls_sha256"] = None
     d.update(over)
     return d
 
@@ -59,9 +76,14 @@ def shipped_config():
 
     Timing assertions must use this and not the mock's own values: REVIEW.1 F-03
     existed precisely because the documented 4 s budget had only ever been
-    measured against config.test.json's timeout of 1.
+    measured against a test config's timeout of 1.
     """
     with open(os.path.join(HERE, "config.example.json")) as f:
+        return json.load(f)
+
+
+def shipped_device_example():
+    with open(os.path.join(HERE, "device.example.json")) as f:
         return json.load(f)
 
 

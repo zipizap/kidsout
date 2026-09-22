@@ -1,50 +1,71 @@
 #!/usr/bin/env python3
 """
-kidsout device driver: Xbox (two interfaces, see device.json)
+kidsout generic OpenWrt device driver.
 
-Controls the console through an OpenWrt router's ubus-over-HTTP JSON-RPC API
-(uhttpd-mod-ubus + rpcd), using a dedicated, ACL-scoped rpcd login and a
-fixed-verb helper installed on the router by router_bootstrap.sh.
+Controls ONE LAN device's internet access through an OpenWrt router's
+ubus-over-HTTP JSON-RPC API (uhttpd-mod-ubus + rpcd), using a dedicated,
+ACL-scoped rpcd login and a fixed-verb helper installed on the router by
+router_bootstrap.sh. The same code serves every device; what differs per
+device lives in its own directory (see README.md):
+
+    devices/<name>/generic-openwrt-driver_files/
+        device.json      device facts: id, interfaces (MACs), thresholds, router
+        config.json      the rpcd credential for THIS device (0600, gitignored)
+        .state.json      last counter sample, cached endpoint (driver-owned)
+        driver.log       the diagnostic channel (driver-owned)
+
+The driver is told which device it is serving with --device-dir or the
+KIDSOUT_DEVICE_DIR environment variable; the per-device wrappers set it.
+
+Everything on the router is namespaced by device.json's `id`, so two devices
+never interfere:
+
+    firewall rule     kidsout_<id>_out
+    helper            /usr/libexec/kidsout-<id>
+    rpcd ACL          kidsout-<id>
+    rpcd login        kidsout-<id>          (default username)
+    accumulator       /tmp/kidsout-<id>.acct / .addrs
 
 Enforcement model
 -----------------
-One firewall rule, `kidsout_xbox_out`: REJECT everything forwarded from the
-console's MAC address to the wan zone. Matching on the MAC rather than the
-IPv4 address covers IPv6 as well, and survives the console's address changing.
+One firewall rule, `kidsout_<id>_out`: REJECT everything forwarded from the
+device's MAC address(es) to the wan zone. Matching on the MAC rather than the
+IPv4 address covers IPv6 as well, and survives the device's address changing.
 `enabled` is the toggle:
 
     enabled = "1"  ->  REJECT is in force  ->  internet BLOCKED
     enabled = "0"  ->  REJECT is absent    ->  internet ALLOWED
 
-Blocking also flushes the console's conntrack entries, because OpenWrt accepts
-established flows before any user rule is evaluated — without the flush, a game
-already in progress would keep running for days.
+Blocking also flushes the device's conntrack entries, because OpenWrt accepts
+established flows before any user rule is evaluated — without the flush, a
+session already in progress would keep running for hours.
 
 State model
 -----------
-`state` reports whether the console is *actually being used*, measured as the
-byte rate through an nft counter keyed on its MAC. Counting flows instead would
-report Instant-On standby as "in use" and silently burn the day's allowance.
+`state` reports whether the device is *actually being used*, measured as the
+byte rate (outbound OR inbound) through router-side conntrack accounting keyed
+on its addresses. Counting flows instead would report standby keep-alives as
+"in use" and silently burn the day's allowance.
 
 Commands:
     probe        no-credential health check: which endpoint answers
     selftest     with credentials: verify every capability the driver needs
-    status       console presence, router state, rule state, traffic
+    status       device presence, router state, rule state, traffic
     state        one word for kidsout: up | down | unknown  (contract)
     block        internet OFF  (enable the REJECT rule + flush live flows)
     allow        internet ON   (disable the REJECT rule)
-    install      create the firewall rule and the nft counters (idempotent)
+    install      create the firewall rule and register the counters (idempotent)
     uninstall    remove both (destructive)
-    discover     find the console's MAC on the router; --write updates device.json
-    check        is the console present on the LAN right now
+    discover     find the device's MAC(s) on the router; --write updates device.json
+    check        is the device present on the LAN right now
     counters     current byte counters and the rate since the last sample
-    calibrate    sample the byte rate over time (for tuning the up/down threshold)
+    calibrate    sample the byte rate over time (for tuning the up/down thresholds)
     pin          record the router's TLS certificate fingerprint in device.json
 
-Examples:
-    ./xbox.py selftest
-    ./xbox.py block            # kid time over
-    ./xbox.py allow            # play time
+Examples (from devices/<name>/generic-openwrt-driver_files/):
+    ./driver.sh selftest
+    ./driver.sh block            # kid time over
+    ./driver.sh allow            # play time
 """
 
 import argparse
@@ -59,20 +80,55 @@ import time
 import hashlib
 from datetime import datetime
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-DEVICE_FILE = os.path.join(HERE, "device.json")
-CONFIG_FILE = os.path.join(HERE, "config.json")
-STATE_FILE = os.path.join(HERE, ".state.json")
-LOG_FILE = os.path.join(HERE, "xbox.log")
-LOG_MAX_BYTES = 256 * 1024
+HERE = os.path.dirname(os.path.abspath(__file__))       # the shared driver code
 
-HELPER = "/usr/libexec/kidsout-xbox"
+# Per-device paths. Set by set_device_dir(); module globals so the test
+# scaffolding can redirect them into a temp directory.
+DEVICE_DIR = None
+DEVICE_FILE = None
+CONFIG_FILE = None
+STATE_FILE = None
+LOG_FILE = None
+LOG_MAX_BYTES = 256 * 1024
 
 # uci `enabled` values, named after what they mean rather than what they are.
 # Getting these two round the wrong way is REVIEW.1 F-01, the defect that made
 # v1 do the exact opposite of its purpose.
 ENABLED_WHEN_BLOCKED = "1"
 ENABLED_WHEN_ALLOWED = "0"
+
+# device.json `id`: lowercase letters and digits only, starting with a letter.
+# uci section names allow only [A-Za-z0-9_], and keeping '_' OUT of the id is
+# what makes the `kidsout_<id>_` prefix boundary in find_sections() airtight.
+ID_RE = re.compile(r"^[a-z][a-z0-9]{0,23}$")
+
+
+def set_device_dir(path):
+    """Anchor every per-device file on `path`."""
+    global DEVICE_DIR, DEVICE_FILE, CONFIG_FILE, STATE_FILE, LOG_FILE
+    DEVICE_DIR = os.path.abspath(path)
+    DEVICE_FILE = os.path.join(DEVICE_DIR, "device.json")
+    CONFIG_FILE = os.path.join(DEVICE_DIR, "config.json")
+    STATE_FILE = os.path.join(DEVICE_DIR, ".state.json")
+    LOG_FILE = os.path.join(DEVICE_DIR, "driver.log")
+
+
+class Names:
+    """Every router-side and rule name derived from the device id, in one place."""
+
+    def __init__(self, device_id):
+        self.id = device_id
+        self.helper = f"/usr/libexec/kidsout-{device_id}"
+        self.acl = f"kidsout-{device_id}"
+        self.user = f"kidsout-{device_id}"
+        self.prefix = f"kidsout_{device_id}"
+        self.rule = f"{self.prefix}_out"
+        self.acct = f"/tmp/kidsout-{device_id}.acct"
+        self.addrs = f"/tmp/kidsout-{device_id}.addrs"
+
+
+def names_for(device):
+    return Names(device["id"])
 
 
 # --------------------------------------------------------------------------- #
@@ -102,12 +158,14 @@ class PinMismatch(RouterUnreachable):
 # logging
 # --------------------------------------------------------------------------- #
 def log(msg):
-    """Append a line to the driver's own log.
+    """Append a line to the device's own log.
 
     Upstream kidsout runs the scripts with Go's cmd.Output(), which discards
     stderr on the success path, so stderr is not a usable diagnostic channel
     (REVIEW.1 F-02). This file is.
     """
+    if not LOG_FILE:
+        return
     try:
         if os.path.exists(LOG_FILE) and os.path.getsize(LOG_FILE) > LOG_MAX_BYTES:
             with open(LOG_FILE, "rb") as f:
@@ -132,6 +190,28 @@ def load_json(path, required=True):
         return None
     with open(path) as f:
         return json.load(f)
+
+
+def load_device(path):
+    """device.json, validated. Exits with a precise message on a bad copy.
+
+    A device.json copied from another device and only half-edited is the most
+    likely operator error, and the most expensive: a stale `rules.prefix`
+    would make THIS device toggle the OTHER device's rule. So the id is
+    validated and any explicit prefix must agree with the derived one.
+    """
+    dev = load_json(path)
+    dev_id = dev.get("id")
+    if not isinstance(dev_id, str) or not ID_RE.fullmatch(dev_id):
+        sys.exit(f"{path}: 'id' must match {ID_RE.pattern} (lowercase letters/digits, "
+                 f"no '_' or '-'); got {dev_id!r}. Set it to the device directory name.")
+    n = Names(dev_id)
+    explicit = (dev.get("rules") or {}).get("prefix")
+    if explicit and explicit != n.prefix:
+        sys.exit(f"{path}: rules.prefix is {explicit!r} but id {dev_id!r} derives "
+                 f"{n.prefix!r}. Remove rules.prefix (it is derived) or fix the id — "
+                 f"a mismatch would toggle another device's firewall rule.")
+    return dev
 
 
 def load_state():
@@ -204,11 +284,12 @@ def human_bytes(n):
 # ubus JSON-RPC client
 # --------------------------------------------------------------------------- #
 class Router:
-    """ubus-over-HTTP JSON-RPC client for an OpenWrt router."""
+    """ubus-over-HTTP JSON-RPC client for an OpenWrt router, bound to one device."""
 
     def __init__(self, cfg, device, timeout=None, deadline=None):
         self.cfg = cfg
         self.device = device
+        self.names = names_for(device)
         r = device["router"]
         self.hosts = ([cfg["host"]] if cfg.get("host")
                       else [r["primary_host"]] + list(r.get("alt_hosts") or []))
@@ -221,7 +302,9 @@ class Router:
         self.pin = (r.get("tls_sha256") or cfg.get("tls_sha256") or "").lower().replace(":", "")
         self.timeout = timeout if timeout is not None else cfg.get("timeout", 10)
         self.session_timeout = cfg.get("session_timeout", 30)
-        self.username = cfg.get("username", "kidsout")
+        # The login router_bootstrap.sh creates is kidsout-<id>; config.json
+        # may override it (e.g. a login created before the per-device scheme).
+        self.username = cfg.get("username") or self.names.user
         self.password = cfg.get("password", "")
         self.deadline = deadline or Deadline(None)
         self.url = None
@@ -411,10 +494,9 @@ class Router:
         there is nothing staged to apply. That is the NORMAL case here:
         `uci commit` already writes the package AND fires
         rpc_uci_trigger_event() itself, so by the time apply runs the change
-        set is empty. Verified on this router (OpenWrt 24.10.5, rpcd
-        2025.09.01) — this settles REVIEW.1 F-09's open question: the explicit
-        apply after commit is redundant, and treating its NO_DATA as an error
-        made `install` exit 1 despite having done its job correctly.
+        set is empty (verified on OpenWrt 24.10.5, rpcd 2025.09.01; settles
+        REVIEW.1 F-09's open question). Treating NO_DATA as an error made
+        `install` exit 1 despite having done its job correctly.
 
         It is kept rather than deleted because other rpcd builds do stage
         changes for apply, and a missed reload is a silent enforcement
@@ -429,12 +511,13 @@ class Router:
 
     # ---- the router-side helper ---------------------------------------- #
     def helper(self, verb, *args):
-        """Run a verb of /usr/libexec/kidsout-xbox. Returns (code, stdout, stderr).
+        """Run a verb of /usr/libexec/kidsout-<id>. Returns (code, stdout, stderr).
 
         Raises rather than swallowing: 'the helper said no' and 'we could not
         ask the router' must stay distinguishable (REVIEW.1 F-02).
         """
-        r = self.call("file", "exec", {"command": HELPER, "params": [verb, *[str(a) for a in args]]})
+        r = self.call("file", "exec", {"command": self.names.helper,
+                                       "params": [verb, *[str(a) for a in args]]})
         return r.get("code", -1), (r.get("stdout") or ""), (r.get("stderr") or "")
 
     def helper_ok(self, verb, *args):
@@ -458,18 +541,17 @@ MAC_RE = re.compile(r"(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}")
 
 
 def interfaces(device):
-    """Every interface the console can appear on, as [{'mac','ipv4','link'}].
+    """Every interface the device can appear on, as [{'mac','ipv4','link'}].
 
-    A console has a SEPARATE MAC for wired and wireless, and switches between
-    them whenever the cable is plugged or pulled. v2 recorded only whichever
-    one happened to be live when `discover` ran, which meant the block could
-    be keyed on an interface the console was not using -- matching nothing,
-    while still reporting success (REVIEW.2 G-02). Both must be covered.
+    Many devices have a SEPARATE MAC for wired and wireless and switch between
+    them whenever a cable is plugged or pulled. An earlier version recorded
+    only whichever one happened to be live when `discover` ran, so the block
+    could be keyed on an interface the device was not using -- matching
+    nothing, while still reporting success (REVIEW.2 G-02). Every interface
+    must be covered.
 
-    This is the ONLY reader of the console's identity. The top-level
-    mac/ipv4 scalars it used to fall back to are gone: they named interface
-    [0] alone, so every caller that reached for them silently ignored the
-    other interface -- which is the same G-02 bug wearing a different hat.
+    This is the ONLY reader of the device's identity: `interfaces` is the
+    single source of truth, there are no top-level mac/ipv4 scalars.
     """
     out = []
     for e in device.get("interfaces") or []:
@@ -485,8 +567,8 @@ def require_macs(device):
     """Every configured MAC, lowercased. Exits if none is usable."""
     macs = [e["mac"] for e in interfaces(device)]
     if not macs:
-        sys.exit("device.json lists no valid interface MAC. Turn the console on "
-                 "and run:\n    ./xbox.py discover --write")
+        sys.exit("device.json lists no valid interface MAC. Turn the device on, "
+                 "make it use the network, and run:\n    ./driver.sh discover --write")
     return macs
 
 
@@ -500,24 +582,23 @@ def static_addresses(device):
     return [e["ipv4"] for e in interfaces(device) if e.get("ipv4")]
 
 
-def get_xbox_rules(device):
-    """The rule set. One rule: everything the console forwards to wan is REJECTed.
+def get_rules(device):
+    """The rule set. One rule: everything the device forwards to wan is REJECTed.
 
     Keyed on the MAC, not the IPv4 address, so IPv6 is covered too (F-04) and a
     DHCP change cannot silently disarm the block. v1's `_fwd_in` added nothing
-    (a console that cannot send is not reachable either) and its `_input_out`
+    (a device that cannot send is not reachable either) and its `_input_out`
     was a forward rule despite its name and a strict subset of this one (F-08).
 
-    ALL of the console's MACs go on the one rule. fw4 parses src_mac as a list
+    ALL of the device's MACs go on the one rule. fw4 parses src_mac as a list
     (fw4.uc:2314, PARSE_LIST), so wired and wireless are covered by a single
-    section and the block does not care which one the console is using today
-    (REVIEW.2 G-02).
+    section and the block does not care which one is in use today (G-02).
     """
-    p = device["rules"]["prefix"]
+    n = names_for(device)
     macs = require_macs(device)
     return [
-        (f"{p}_out", {
-            "name": "kidsout xbox: block internet",
+        (n.rule, {
+            "name": f"kidsout {n.id}: block internet",
             "src": device["network"]["zone"],
             "dest": device["network"].get("wan_zone", "wan"),
             "src_mac": macs if len(macs) > 1 else macs[0],
@@ -528,9 +609,19 @@ def get_xbox_rules(device):
     ]
 
 
+def owns_section(prefix, name):
+    """Is uci section `name` one of THIS device's?
+
+    A bare startswith() would let `kidsout_xbox` claim `kidsout_xbox2_out`
+    and delete or toggle another device's rule. The id cannot contain '_'
+    (ID_RE), so `prefix + '_'` is an unambiguous boundary.
+    """
+    return name == prefix or name.startswith(prefix + "_")
+
+
 def find_sections(fw, prefix):
     data = fw.uci_get("firewall")
-    return {n: o for n, o in (data.get("values") or {}).items() if n.startswith(prefix)}
+    return {n: o for n, o in (data.get("values") or {}).items() if owns_section(prefix, n)}
 
 
 def describe(value):
@@ -538,9 +629,10 @@ def describe(value):
 
 
 def cmd_install(fw, device, args):
-    rules = get_xbox_rules(device)
+    n = names_for(device)
+    rules = get_rules(device)
     wanted = dict(rules)
-    existing = find_sections(fw, device["rules"]["prefix"])
+    existing = find_sections(fw, n.prefix)
 
     created, updated, removed = [], [], []
     for name, values in rules:
@@ -565,11 +657,12 @@ def cmd_install(fw, device, args):
     out = install_counters(fw, device)
     print(f"counters: {out}")
     log(f"install: created={created} updated={updated} removed={removed} counters={out}")
-    print("\nthe console should still be online. verify, then './xbox.py block' to test enforcement.")
+    print(f"\nthe device should still be online. verify, then './driver.sh block' to test enforcement.")
 
 
 def cmd_uninstall(fw, device, _args):
-    existing = find_sections(fw, device["rules"]["prefix"])
+    n = names_for(device)
+    existing = find_sections(fw, n.prefix)
     for name in existing:
         fw.uci_delete("firewall", name)
     if existing:
@@ -577,7 +670,7 @@ def cmd_uninstall(fw, device, _args):
         fw.uci_apply(rollback=False)
         print(f"firewall: removed {sorted(existing)}")
     else:
-        print("firewall: no kidsout_xbox sections found")
+        print(f"firewall: no {n.prefix} sections found")
     try:
         print("counters:", fw.helper_ok("counters-remove").strip())
     except UbusError as e:
@@ -588,10 +681,11 @@ def cmd_uninstall(fw, device, _args):
 def _set_enabled(fw, device, value):
     """Idempotent: reads before writing, so the steady state costs one read-only
     RPC and no flash write (REVIEW.1 F-09). Returns True if anything changed."""
-    existing = find_sections(fw, device["rules"]["prefix"])
+    n = names_for(device)
+    existing = find_sections(fw, n.prefix)
     if not existing:
-        sys.exit("no kidsout_xbox firewall sections found — run './xbox.py install' first")
-    stale = [n for n, o in existing.items() if str(o.get("enabled", "1")) != value]
+        sys.exit(f"no {n.prefix} firewall sections found — run './driver.sh install' first")
+    stale = [nm for nm, o in existing.items() if str(o.get("enabled", "1")) != value]
     if not stale:
         print(f"already {describe(value)} (no change, nothing written)")
         return False
@@ -605,14 +699,13 @@ def _set_enabled(fw, device, value):
 
 
 def live_addresses(fw, device):
-    """Addresses the router currently associates with any of the console's MACs.
+    """Addresses the router currently associates with any of the device's MACs.
 
     Resolved at run time from the DHCP lease file and the neighbour table
-    rather than trusting device.json's static IPv4, because only one of the
-    console's two interfaces is up at a time and the other one's address is
-    stale by definition. Both interfaces do now hold a static DHCP reservation
-    (see device.json's comment), but a reservation only takes effect once the
-    console renews, so it makes this resolution reliable rather than
+    rather than trusting device.json's static IPv4, because only one of a
+    dual-interface device's MACs is up at a time and the other one's address
+    is stale by definition. A static DHCP reservation only takes effect once
+    the device renews, so it makes this resolution reliable rather than
     unnecessary (REVIEW.2 G-02, G-06).
 
     Returns (addresses, links) where links maps address -> how we found it.
@@ -653,7 +746,7 @@ def routable(addr):
     """Could traffic from this address reach the internet?
 
     Link-local (fe80::/10, 169.254/16) and unique-local (fd00::/8) addresses
-    never leave the LAN, so traffic on them is the console talking to something
+    never leave the LAN, so traffic on them is the device talking to something
     in the house -- not internet use. Counting it would inflate the byte rate
     with LAN chatter and break a threshold that was calibrated on IPv4 alone.
     They are still worth FLUSHING, just not worth COUNTING.
@@ -668,10 +761,10 @@ def routable(addr):
 
 def accounting_addresses(fw, device):
     """Addresses whose bytes count toward the up/down decision."""
-    return [a for a in console_addresses(fw, device) if routable(a)]
+    return [a for a in device_addresses(fw, device) if routable(a)]
 
 
-def console_addresses(fw, device):
+def device_addresses(fw, device):
     """Every address worth acting on: live ones first, configured ones as backup.
 
     The static entries are kept as a fallback so a block still targets
@@ -686,23 +779,23 @@ def console_addresses(fw, device):
 
 
 def flush_conntrack(fw, device):
-    """Drop the console's existing flows so a block bites immediately.
+    """Drop the device's existing flows so a block bites immediately.
 
     Returns (ok, detail). This is NOT an optimisation: with flow offloading
-    enabled -- and this router offloads in hardware -- an established flow is
+    enabled -- and many routers offload in hardware -- an established flow is
     forwarded by the PPE without entering any netfilter hook, so the REJECT
     rule never applies to it at all. Reloading the firewall does not help
     either: the conntrack entry survives, matches `ct state established
     : accept`, and is immediately re-offloaded. Destroying the conntrack entry
     is the ONLY thing that cuts a session already in progress (REVIEW.2 G-03).
 
-    Once the flush lands the console cannot re-offload while blocked: `flow add
+    Once the flush lands the device cannot re-offload while blocked: `flow add
     @ft` only acts on established, bidirectionally-seen flows, and new SYNs are
     REJECTed before they get there. One successful flush is enough.
     """
-    addrs = console_addresses(fw, device)
+    addrs = device_addresses(fw, device)
     if not addrs:
-        return False, "no console addresses known — nothing could be flushed"
+        return False, "no device addresses known — nothing could be flushed"
     try:
         detail = fw.helper_ok("flush", *addrs).strip()
         log(f"conntrack flushed for {addrs}: {detail}")
@@ -722,10 +815,10 @@ def cmd_block(fw, device, _args):
     ok, detail = flush_conntrack(fw, device)
     print("conntrack:", detail)
     if not ok:
-        # Exiting 0 here would tell kidsout the console was blocked while it
-        # carried on playing. block.sh is re-run every tick while blocked and
-        # up, so a non-zero exit costs one log line a minute and stops as soon
-        # as the flush succeeds -- far better than a silent lie (REVIEW.2 G-03).
+        # Exiting 0 here would tell kidsout the device was blocked while it
+        # carried on. block.sh is re-run every tick while blocked and up, so a
+        # non-zero exit costs one log line a minute and stops as soon as the
+        # flush succeeds -- far better than a silent lie (REVIEW.2 G-03).
         log("block: FLUSH FAILED — an in-progress session may still be running")
         return 1
 
@@ -738,7 +831,7 @@ def cmd_allow(fw, device, _args):
 # traffic counters  (the state signal)
 # --------------------------------------------------------------------------- #
 def install_counters(fw, device):
-    """Register the console's current addresses with the accounting helper.
+    """Register the device's current addresses with the accounting helper.
 
     Re-registering the same set is a no-op on the router, so this is cheap to
     call on every self-heal; changing the set resets the accumulator, which
@@ -746,7 +839,7 @@ def install_counters(fw, device):
     """
     addrs = accounting_addresses(fw, device)
     if not addrs:
-        raise UbusError("no routable console addresses known (console offline "
+        raise UbusError("no routable device addresses known (device offline "
                         "and device.json has no static ipv4)")
     return fw.helper_ok("counters-install", *addrs).strip()
 
@@ -761,20 +854,29 @@ def helper_facts(fw):
     return facts
 
 
+_legacy_keys_warned = False
+
+
 def read_counters(fw):
-    """Return {'xbox_out': bytes, 'xbox_in': bytes} as MONOTONIC totals.
+    """Return {'out': bytes, 'in': bytes} as MONOTONIC totals.
 
     The helper accumulates router-side and guarantees the totals never
     decrease, which is what sample_rate() assumes. That guarantee is the whole
     reason the accumulation happens on the router: the underlying conntrack
     byte counters are per-flow and vanish when a flow expires, so a naive sum
-    goes DOWN -- measured at -510 KB/min during active gameplay (REVIEW.2
-    G-04). Do not reintroduce a bare sum here.
+    goes DOWN -- measured at -510 KB/min during active gameplay on the first
+    device (REVIEW.2 G-04). Do not reintroduce a bare sum here.
 
-    Raises CountersMissing (helper exit 4) when the console's addresses are not
+    Output shape: one `out <n>` and one `in <n>` line. A helper installed by a
+    pre-generic bootstrap prints `<id>_out` / `<id>_in` instead; those are
+    accepted and normalised so the driver keeps working until the router's
+    helper is refreshed (`router_bootstrap.sh <id> --helper-only`).
+
+    Raises CountersMissing (helper exit 4) when the device's addresses are not
     registered, so callers can self-heal; RouterUnreachable if the router could
     not be asked at all.
     """
+    global _legacy_keys_warned
     code, out, err = fw.helper("counters")
     if code == 4:
         raise CountersMissing(err.strip() or "no addresses registered")
@@ -782,32 +884,33 @@ def read_counters(fw):
         raise UbusError(f"helper counters failed (code {code}): {err.strip() or out.strip()}")
 
     vals = {}
-    # v3 shape: "xbox_out <n>" / "xbox_in <n>" / "source <name>", one per line.
+    legacy = False
     for line in out.splitlines():
         f = line.split()
-        if len(f) == 2 and f[0] in ("xbox_out", "xbox_in") and f[1].isdigit():
-            vals[f[0]] = int(f[1])
-    if vals:
-        return vals
-
-    # Pre-v3 nft shapes, kept so a router still running the old helper does not
-    # hard-fail: json first, then the plain-text counter block.
-    try:
-        doc = json.loads(out)
-        for item in doc.get("nftables", []):
-            c = item.get("counter")
-            if c and "name" in c:
-                vals[c["name"]] = int(c.get("bytes", 0))
-    except (json.JSONDecodeError, ValueError, AttributeError):
-        for m in re.finditer(r"counter\s+(\S+)\s*\{[^}]*?bytes\s+(\d+)", out, re.S):
-            vals[m.group(1)] = int(m.group(2))
+        if len(f) != 2 or not f[1].isdigit():
+            continue
+        key = f[0]
+        if key in ("out", "in"):
+            vals[key] = int(f[1])
+        elif key.endswith("_out") or key.endswith("_in"):
+            vals[key.rsplit("_", 1)[1]] = int(f[1])
+            legacy = True
+    if legacy and not _legacy_keys_warned:
+        # once per process, and at most hourly across processes: kidsout runs
+        # one process per minute, and a nag per tick would drown the log
+        _legacy_keys_warned = True
+        st = load_state()
+        if time.time() - st.get("legacy_keys_warned_ts", 0) > 3600:
+            log(f"warn: the router helper {fw.names.helper} prints legacy counter keys; "
+                f"refresh it with: sh /tmp/router_bootstrap.sh {fw.names.id} --helper-only")
+            save_state({"legacy_keys_warned_ts": time.time()})
     if not vals:
         raise UbusError(f"could not parse counters from: {out[:200]!r}")
     return vals
 
 
 class CountersMissing(UbusError):
-    """The console's addresses are not registered with the helper."""
+    """The device's addresses are not registered with the helper."""
 
 
 def sample_rate(fw, device, state, now=None):
@@ -832,12 +935,17 @@ def sample_rate(fw, device, state, now=None):
         return None, None, "clock went backwards"
     if dt > max_age:
         return None, None, f"previous sample is {dt:.0f}s old (> {max_age}s), too stale to use"
+    if set(cur) != set(prev):
+        # e.g. a .state.json written by the pre-generic driver (xbox_out keys)
+        # read by this one (out keys): diffing against a missing key would
+        # turn the whole total into one enormous, false 'up'.
+        return None, None, "counter keys changed (driver or helper upgraded), re-baselining"
     if any(cur.get(k, 0) < prev.get(k, 0) for k in cur):
-        return None, None, "counters decreased (router reboot or nft flush)"
+        return None, None, "counters decreased (router reboot or accumulator reset)"
 
     per_min = 60.0 / dt
-    return ((cur.get("xbox_out", 0) - prev.get("xbox_out", 0)) * per_min,
-            (cur.get("xbox_in", 0) - prev.get("xbox_in", 0)) * per_min,
+    return ((cur.get("out", 0) - prev.get("out", 0)) * per_min,
+            (cur.get("in", 0) - prev.get("in", 0)) * per_min,
             None)
 
 
@@ -848,7 +956,7 @@ def thresholds(cfg_state):
     """(threshold_out, threshold_in) in bytes/min from device.json -> state.
 
     threshold_in may be None, which means the inbound rule is off and the
-    verdict is outbound-only (the pre-2026-09-21 behaviour).
+    verdict is outbound-only.
     """
     return (cfg_state.get("threshold_out_bytes_per_min", 200 * 1024),
             cfg_state.get("threshold_in_bytes_per_min"))
@@ -863,19 +971,16 @@ def verdict_for(rate_out, rate_in, cfg_state):
         rate_in  > threshold_in_bytes_per_min       -> ("up", "in")
         otherwise                                   -> ("down", None)
 
-    Why two directions: gameplay uploads continuously (289-472 KB/min out,
-    calibrated 2026-09-15), but streaming video is almost pure INBOUND -- YouTube
-    measured 2026-09-21 at 60-80 KB/min out against 4.4-18 MB/min in, and read
-    'down' all evening under the outbound-only rule. No outbound threshold can
-    catch it: a background game download produces 93.7 KB/min out, MORE than
-    streaming does, so any line low enough for YouTube also fires on patches and
-    sits next to random ACK bursts. Hence a separate inbound floor.
+    Why two directions: interactive use (gameplay, video calls) uploads
+    continuously, but streaming video is almost pure INBOUND and can sit
+    below any sane outbound line -- a background download produces MORE
+    outbound than a video stream does, so no single outbound threshold
+    separates the two. Hence a separate inbound floor.
 
-    The accepted cost: a game download in progress reads 'up' too. That only
-    happens while the console is powered on (it is in Energy-saving mode, so
-    nothing downloads while off), and a false 'up' is loud -- it burns allowance
-    and gets complained about -- whereas a false 'down' is silent unmetered
-    viewing. See DESIGN.md §5.
+    The accepted cost: a large download in progress reads 'up' too. A false
+    'up' is loud -- it burns allowance and gets complained about -- whereas a
+    false 'down' is silent unmetered viewing. See DESIGN.md §5, and the
+    device's README for the numbers this was calibrated on.
     """
     thr_out, thr_in = thresholds(cfg_state)
     if rate_out > thr_out:
@@ -895,13 +1000,13 @@ def _fmt_thresholds(cfg_state):
 def cmd_state(fw, device, _args):
     """Print exactly one of up / down / unknown.
 
-    up      the console's outbound byte rate is above threshold_out, OR its
+    up      the device's outbound byte rate is above threshold_out, OR its
             inbound rate is above threshold_in (streaming) -- see verdict_for()
-    down    the router answered and the console is idle (or blocked)
+    down    the router answered and the device is idle (or blocked)
     unknown the router could not be consulted, or there is no usable baseline
 
     Never raises: kidsout parses stdout, and a traceback there would be read as
-    'unknown' by accident rather than on purpose. Detail goes to xbox.log,
+    'unknown' by accident rather than on purpose. Detail goes to driver.log,
     because upstream discards stderr (REVIEW.1 F-02).
     """
     st = load_state()
@@ -911,12 +1016,12 @@ def cmd_state(fw, device, _args):
         try:
             rate_out, rate_in, reason = sample_rate(fw, device, st)
         except CountersMissing:
-            # self-heal: recreate the accounting table, then admit we cannot
-            # know this tick (F-10 — nothing else reconciles router-side state)
+            # self-heal: re-register the addresses, then admit we cannot know
+            # this tick (F-10 — nothing else reconciles router-side state)
             install_counters(fw, device)
             save_state(st)
             print("unknown")
-            log("state=unknown reason=counters table missing; reinstalled")
+            log("state=unknown reason=counters not registered; reinstalled")
             return 0
 
         save_state(st)
@@ -937,7 +1042,7 @@ def cmd_state(fw, device, _args):
     except Exception as e:
         print("unknown")
         log(f"state=unknown error={type(e).__name__}: {e}")
-        print(f"xbox state unknown: {e}", file=sys.stderr)
+        print(f"{device.get('id', 'device')} state unknown: {e}", file=sys.stderr)
         return 1
 
 
@@ -953,13 +1058,14 @@ def _periodic_rule_audit(fw, device, st, verdict):
     last = st.get("rule_audit_ts", 0)
     if time.time() - last < period:
         return
+    n = names_for(device)
     try:
-        secs = find_sections(fw, device["rules"]["prefix"])
+        secs = find_sections(fw, n.prefix)
         if not secs:
-            log("audit: NO kidsout_xbox rules installed on the router")
+            log(f"audit: NO {n.prefix} rules installed on the router")
         else:
-            vals = {n: str(o.get("enabled", "?")) for n, o in sorted(secs.items())}
-            meaning = ", ".join(f"{n}={describe(v)}" for n, v in vals.items())
+            vals = {nm: str(o.get("enabled", "?")) for nm, o in sorted(secs.items())}
+            meaning = ", ".join(f"{nm}={describe(v)}" for nm, v in vals.items())
             log(f"audit: {meaning}")
         st["rule_audit_ts"] = time.time()
         save_state(st)
@@ -1011,7 +1117,7 @@ def cmd_pin(fw, device, _args):
     with open(DEVICE_FILE, "w") as f:
         json.dump(dev, f, indent=2)
         f.write("\n")
-    print(f"written to device.json (router.tls_sha256)")
+    print(f"written to {DEVICE_FILE} (router.tls_sha256)")
     print("from now on the driver refuses to send credentials to any other certificate.")
     print("NOTE: re-run this after the router regenerates its certificate.")
     return 0
@@ -1019,6 +1125,7 @@ def cmd_pin(fw, device, _args):
 
 def cmd_selftest(fw, device, _args):
     """Verify every capability the driver needs, with real credentials."""
+    n = names_for(device)
     results = []
 
     def check(label, fn):
@@ -1030,11 +1137,24 @@ def cmd_selftest(fw, device, _args):
             results.append((False, label, str(e)))
             print(f"  FAIL  {label} — {e}")
 
-    print("kidsout xbox driver selftest\n")
+    print(f"kidsout openwrt driver selftest — device '{n.id}' "
+          f"({device.get('display_name') or 'no display_name'})\n")
+
+    def layout():
+        # kidsout names the device after devices/<name>/; the per-device files
+        # sit one level below that. A mismatch is not fatal, but it is almost
+        # always a half-edited copy.
+        parent = os.path.basename(os.path.dirname(DEVICE_DIR))
+        if parent != n.id:
+            raise UbusError(f"id is '{n.id}' but the device directory is '{parent}' "
+                            f"({os.path.dirname(DEVICE_DIR)}); expected them to match")
+        return f"devices/{parent}/{os.path.basename(DEVICE_DIR)}"
+    check("device directory matches id", layout)
+
     check("ubus endpoint reachable", lambda: fw.probe())
     check(f"login as '{fw.username}'", lambda: f"session {fw.login()[:8]}…")
     check("read uci firewall", lambda: f"{len(fw.uci_get('firewall').get('values') or {})} sections")
-    check("router helper installed", lambda: fw.helper_ok("info").strip().replace("\n", ", "))
+    check(f"router helper {n.helper}", lambda: fw.helper_ok("info").strip().replace("\n", ", "))
     check("helper: neighbour table", lambda: f"{len(fw.helper_ok('neigh').splitlines())} entries")
     check("helper: dhcp leases", lambda: f"{len(fw.helper_ok('leases').splitlines())} leases")
 
@@ -1042,17 +1162,17 @@ def cmd_selftest(fw, device, _args):
         try:
             return ", ".join(f"{k}={human_bytes(v)}" for k, v in sorted(read_counters(fw).items()))
         except CountersMissing:
-            return "not installed yet (run './xbox.py install')"
+            return "not installed yet (run './driver.sh install')"
     check("traffic counters", counters)
 
     def rules():
-        secs = find_sections(fw, device["rules"]["prefix"])
+        secs = find_sections(fw, n.prefix)
         if not secs:
-            return "not installed yet (run './xbox.py install')"
-        return ", ".join(f"{n}: {describe(str(o.get('enabled')))}" for n, o in sorted(secs.items()))
+            return "not installed yet (run './driver.sh install')"
+        return ", ".join(f"{nm}: {describe(str(o.get('enabled')))}" for nm, o in sorted(secs.items()))
     check("firewall rules", rules)
 
-    check("write access to uci firewall (dry run)", lambda: _write_probe(fw))
+    check("write access to uci firewall (dry run)", lambda: _write_probe(fw, n))
 
     def enforcement_preconditions():
         """The two ways a block can look fine and do nothing."""
@@ -1076,14 +1196,14 @@ def cmd_selftest(fw, device, _args):
                 f"{facts.get('flowtable_counter')}, hw={facts.get('flowtable_hw')}")
     check("enforcement preconditions", enforcement_preconditions)
 
-    def console_visible():
+    def device_visible():
         addrs, how = live_addresses(fw, device)
         cfg_macs = require_macs(device)
         if not addrs:
             raise UbusError(f"none of {len(cfg_macs)} configured MAC(s) is visible "
-                            f"on the router — is the console on?")
+                            f"on the router — is the device on?")
         return f"{', '.join(addrs)} ({len(cfg_macs)} MAC(s) configured)"
-    check("console is visible on the LAN", console_visible)
+    check("device is visible on the LAN", device_visible)
 
     failed = [r for r in results if not r[0]]
     print()
@@ -1094,11 +1214,17 @@ def cmd_selftest(fw, device, _args):
     return 0
 
 
-def _write_probe(fw):
+def _write_probe(fw, n):
     """Confirm the ACL really grants uci write, without changing anything:
-    add a throwaway section, then revert it before committing."""
-    name = "kidsout_xbox_writetest"
-    fw.uci_add("firewall", "rule", values={"name": "kidsout write test",
+    add a throwaway section, then revert it before committing.
+
+    NOTE: `uci revert firewall` discards EVERY staged (uncommitted) firewall
+    change in rpcd, not just ours. The driver itself never leaves changes
+    staged (each write path commits immediately), but do not call this from
+    the state/block/allow paths -- it belongs to the manual selftest only.
+    """
+    name = f"{n.prefix}_writetest"
+    fw.uci_add("firewall", "rule", values={"name": f"kidsout {n.id} write test",
                                            "enabled": "0", "target": "REJECT"}, name=name)
     fw.uci_delete("firewall", name)
     fw.call("uci", "revert", {"config": "firewall"})
@@ -1106,6 +1232,8 @@ def _write_probe(fw):
 
 
 def cmd_status(fw, device, _args):
+    n = names_for(device)
+    print(f"device   : {n.id} ({device.get('display_name') or '-'})  files: {DEVICE_DIR}")
     try:
         print(f"endpoint : {fw.probe()}")
     except Exception as e:
@@ -1126,17 +1254,17 @@ def cmd_status(fw, device, _args):
               f"offload_hw={info.get('flowtable_hw')} "
               f"openwrt={info.get('openwrt')}")
     except Exception as e:
-        print(f"facts    : helper unavailable ({e})")
+        print(f"facts    : helper {n.helper} unavailable ({e})")
 
     try:
-        secs = find_sections(fw, device["rules"]["prefix"])
+        secs = find_sections(fw, n.prefix)
         if secs:
-            for n, o in sorted(secs.items()):
-                print(f"rule     : {n}: {describe(str(o.get('enabled')))} "
+            for nm, o in sorted(secs.items()):
+                print(f"rule     : {nm}: {describe(str(o.get('enabled')))} "
                       f"(target={o.get('target')} src_mac={o.get('src_mac')} "
                       f"{o.get('src')}->{o.get('dest')})")
         else:
-            print("rule     : NOT INSTALLED (run './xbox.py install')")
+            print(f"rule     : NOT INSTALLED (run './driver.sh install')")
     except Exception as e:
         print(f"rule     : unreadable ({e})")
 
@@ -1153,35 +1281,32 @@ def cmd_status(fw, device, _args):
                   f"{_fmt_thresholds(cfg_state)}  -> {verdict}"
                   f"{' (by ' + by + ')' if by else ''}")
     except CountersMissing:
-        print("traffic  : counters NOT INSTALLED (run './xbox.py install')")
+        print("traffic  : counters NOT INSTALLED (run './driver.sh install')")
     except Exception as e:
         print(f"traffic  : unavailable ({e})")
 
     try:
-        addrs = console_addresses(fw, device)
+        addrs = device_addresses(fw, device)
         configured = ", ".join(f"{e['link']}={e['mac']}/{e['ipv4'] or '?'}"
                                for e in interfaces(device)) or "NONE"
-        print(f"console  : configured {configured}")
+        print(f"device   : configured {configured}")
         print(f"           addresses seen on the router: {', '.join(addrs)}")
         if len(addrs) > 1:
             print("           (IPv6 present — the MAC-based rule covers it)")
     except Exception as e:
-        print(f"console  : ({e})")
+        print(f"device   : ({e})")
     return 0
 
 
 def cmd_check(fw, device, _args):
-    """Is the console present on the LAN right now?
+    """Is the device present on the LAN right now?
 
-    v1 TCP-connected to ports 53/80/443/3074 on the console. Those are
-    destination ports it talks *to*; it listens on none of them, so the answer
-    was 'closed/filtered' whatever the console was doing (REVIEW.1 F-14). The
-    router's neighbour table is the honest test, and works despite the console
-    ignoring ICMP.
+    v1 TCP-connected to ports the device talks *to*; it listens on none of
+    them, so the answer was 'closed/filtered' whatever it was doing (REVIEW.1
+    F-14). The router's neighbour table is the honest test, and works for
+    devices that ignore ICMP.
 
-    Every interface is tested, not just the first. Matching on the legacy
-    scalar mac/ipv4 meant a console sitting on WiFi was reported as powered
-    off, because only the ethernet MAC was ever compared (REVIEW.2 G-02).
+    Every interface is tested, not just the first (REVIEW.2 G-02).
     """
     macs = [e["mac"] for e in interfaces(device)]
     ips = static_addresses(device)
@@ -1189,29 +1314,40 @@ def cmd_check(fw, device, _args):
     hits = [r.strip() for r in rows
             if any(m in r.lower() for m in macs)
             or any(r.startswith(ip + " ") for ip in ips)]
-    # 'ip neigh show' already lists IPv6 rows, and the helper follows it with
-    # 'ip -6 neigh show', so every IPv6 neighbour arrives twice. Show each once.
+    # some helpers list IPv6 neighbours twice; show each once
     hits = list(dict.fromkeys(hits))
     if not hits:
-        print(f"console: NOT present in the router's neighbour table "
+        print(f"device: NOT present in the router's neighbour table "
               f"(macs={', '.join(macs) or 'none'} "
               f"ips={', '.join(ips) or 'none'}) — powered off, or fully asleep")
         return 1
     for h in hits:
-        print(f"console: {h}")
+        print(f"device: {h}")
     print("\n(REACHABLE/STALE/DELAY = the router has an address for it; "
           "FAILED/INCOMPLETE = it is not answering)")
     return 0
 
 
-def cmd_discover(fw, device, args):
-    """Find every interface the console has, by hostname and by known MAC.
+def hostname_hints(device):
+    """Substrings that identify the device in DHCP hostnames, lowercased.
 
-    A console shows up under one MAC on ethernet and another on WiFi, usually
-    differing only in the last octet. v2 recorded whichever was live and
-    silently ignored the other (REVIEW.2 G-02), so this looks for all of them:
-    any lease whose hostname looks like the console, plus anything already in
-    device.json, plus anything sharing the same OUI and near-identical MAC.
+    device.json -> discover.hostname_hints, defaulting to the id. A console
+    might announce itself as 'XBOX'; a Switch does not contain 'nintendoswitch2'
+    in its hostname, so the operator can list what it actually says.
+    """
+    hints = (device.get("discover") or {}).get("hostname_hints") or [device["id"]]
+    return [h.lower() for h in hints if h]
+
+
+def cmd_discover(fw, device, args):
+    """Find every interface the device has, by hostname and by known MAC.
+
+    A dual-interface device shows up under one MAC on ethernet and another on
+    WiFi, usually differing only in the last octet. An earlier version
+    recorded whichever was live and silently ignored the other (REVIEW.2
+    G-02), so this looks for all of them: any lease whose hostname matches a
+    hint, plus anything already in device.json, plus anything sharing the same
+    OUI as a known MAC.
     """
     known = {e["mac"]: dict(e) for e in interfaces(device)}
     found = {}
@@ -1222,7 +1358,7 @@ def cmd_discover(fw, device, args):
     except Exception as e:
         print(f"lease lookup failed: {e}")
 
-    hostname_hint = (device.get("id") or "xbox").lower()
+    hints = hostname_hints(device)
     for line in leases:
         f = line.split()
         if len(f) < 4:
@@ -1231,10 +1367,10 @@ def cmd_discover(fw, device, args):
         if not MAC_RE.fullmatch(mac):
             continue
         same_oui = any(m[:8] == mac[:8] for m in known)
-        if hostname_hint in host.lower() or mac in known or same_oui:
+        if any(h in host.lower() for h in hints) or mac in known or same_oui:
             found[mac] = {"mac": mac, "ipv4": ip, "link": "?", "hostname": host}
 
-    # Which of them is up right now, and on what
+    # Which of them is up right now
     live, how = live_addresses(fw, device)
     try:
         for line in fw.helper_ok("neigh").splitlines():
@@ -1246,8 +1382,9 @@ def cmd_discover(fw, device, args):
         pass
 
     if not found:
-        print("no console interfaces found. Turn the console on, make it talk to "
-              "the network, and try again.")
+        print(f"no interfaces found for hostname hint(s) {hints} or known MACs. Turn the "
+              f"device on, make it talk to the network, and try again — or add its DHCP "
+              f"hostname to device.json -> discover.hostname_hints.")
         return 1
 
     print("interfaces found:")
@@ -1275,7 +1412,7 @@ def cmd_discover(fw, device, args):
     dev["comment"] = (f"interfaces discovered {time.strftime('%Y-%m-%d')}: "
                       + "; ".join(f"{e['mac']}={e['ipv4']}" for e in dev["interfaces"])
                       + ". The firewall rule names every MAC, so the block holds "
-                        "whether the console is on ethernet or WiFi. "
+                        "whichever interface the device is using. "
                       + (dev.get("comment", "") or ""))[:1200]
     with open(DEVICE_FILE, "w") as fh:
         json.dump(dev, fh, indent=2)
@@ -1289,12 +1426,12 @@ def cmd_counters(fw, device, _args):
     try:
         rate_out, rate_in, reason = sample_rate(fw, device, st)
     except CountersMissing:
-        print("counters not installed — run './xbox.py install'")
+        print("counters not installed — run './driver.sh install'")
         return 1
     save_state(st)
     cur = st["counters"]
     print(f"totals since install/reboot: "
-          f"out={human_bytes(cur.get('xbox_out', 0))}  in={human_bytes(cur.get('xbox_in', 0))}")
+          f"out={human_bytes(cur.get('out', 0))}  in={human_bytes(cur.get('in', 0))}")
     if reason:
         print(f"rate: not available — {reason}")
         print("run this again in a minute to get a rate.")
@@ -1305,12 +1442,13 @@ def cmd_counters(fw, device, _args):
 
 
 def cmd_calibrate(fw, device, args):
-    """Sample the byte rate over time, to pick the up/down threshold (F-06)."""
+    """Sample the byte rate over time, to pick the up/down thresholds (F-06)."""
     interval = args.interval
     end = time.time() + args.minutes * 60
     label = args.label or "sample"
+    out_path = args.out or os.path.join(DEVICE_DIR, "calibration.jsonl")
     print(f"sampling every {interval}s for {args.minutes} min  (label: {label})")
-    print(f"writing to {os.path.basename(args.out)}\n")
+    print(f"writing to {out_path}\n")
     print(f"{'time':>8}  {'out KB/min':>11}  {'in KB/min':>10}")
 
     rows = []
@@ -1322,13 +1460,13 @@ def cmd_calibrate(fw, device, args):
             cur = read_counters(fw)
             if prev is not None and now > prev_ts:
                 f = 60.0 / (now - prev_ts)
-                out = (cur.get("xbox_out", 0) - prev.get("xbox_out", 0)) * f / 1024
-                inn = (cur.get("xbox_in", 0) - prev.get("xbox_in", 0)) * f / 1024
+                out = (cur.get("out", 0) - prev.get("out", 0)) * f / 1024
+                inn = (cur.get("in", 0) - prev.get("in", 0)) * f / 1024
                 stamp = datetime.now().strftime("%H:%M:%S")
                 print(f"{stamp:>8}  {out:>11.1f}  {inn:>10.1f}")
                 rows.append({"t": stamp, "label": label, "out_kb_min": round(out, 1),
                              "in_kb_min": round(inn, 1)})
-                with open(args.out, "a") as f_:
+                with open(out_path, "a") as f_:
                     f_.write(json.dumps(rows[-1]) + "\n")
             prev, prev_ts = cur, now
             time.sleep(max(1, interval - (time.time() - now)))
@@ -1336,9 +1474,9 @@ def cmd_calibrate(fw, device, args):
         print("\ninterrupted")
 
     if rows:
-        # Both directions: outbound picks threshold_out_bytes_per_min (play vs
-        # idle/download), inbound picks threshold_in_bytes_per_min (streaming
-        # vs idle). See DESIGN.md §5.
+        # Both directions: outbound picks threshold_out_bytes_per_min (active
+        # use vs idle/download), inbound picks threshold_in_bytes_per_min
+        # (streaming vs idle). See DESIGN.md §5.
         for key, name in (("out_kb_min", "out"), ("in_kb_min", "in ")):
             vals = sorted(r[key] for r in rows)
             print(f"\n{label} {name}: n={len(vals)}  min={vals[0]:.1f}  "
@@ -1359,21 +1497,34 @@ COMMANDS = {
 
 
 def main():
-    ap = argparse.ArgumentParser(description="kidsout xbox device driver")
+    ap = argparse.ArgumentParser(
+        description="kidsout generic OpenWrt device driver",
+        epilog="The device is selected with --device-dir or $KIDSOUT_DEVICE_DIR "
+               "(the directory holding device.json and config.json).")
     ap.add_argument("command", choices=sorted(COMMANDS))
+    ap.add_argument("--device-dir", default=os.environ.get("KIDSOUT_DEVICE_DIR"),
+                    help="directory with device.json/config.json "
+                         "(default: $KIDSOUT_DEVICE_DIR)")
     ap.add_argument("--write", action="store_true",
-                    help="discover: record the MAC in device.json")
+                    help="discover: record the interfaces in device.json")
     ap.add_argument("--minutes", type=float, default=10,
                     help="calibrate: how long to sample (default 10)")
     ap.add_argument("--interval", type=float, default=60,
                     help="calibrate: seconds between samples (default 60)")
     ap.add_argument("--label", default=None,
-                    help="calibrate: what the console is doing (e.g. standby, gaming)")
-    ap.add_argument("--out", default=os.path.join(HERE, "calibration.jsonl"),
-                    help="calibrate: where to append samples")
+                    help="calibrate: what the device is doing (e.g. idle, active, streaming)")
+    ap.add_argument("--out", default=None,
+                    help="calibrate: where to append samples (default <device-dir>/calibration.jsonl)")
     args = ap.parse_args()
 
-    device = load_json(DEVICE_FILE)
+    if not args.device_dir:
+        sys.exit("no device directory: pass --device-dir or set KIDSOUT_DEVICE_DIR to the "
+                 "devices/<name>/generic-openwrt-driver_files/ directory (see README.md)")
+    if not os.path.isdir(args.device_dir):
+        sys.exit(f"device directory does not exist: {args.device_dir}")
+    set_device_dir(args.device_dir)
+
+    device = load_device(DEVICE_FILE)
     if os.path.exists(CONFIG_FILE):
         secure_config(CONFIG_FILE)
     cfg = load_json(CONFIG_FILE, required=False) or {}
@@ -1381,9 +1532,7 @@ def main():
     # The state path gets its own, much tighter budget than the interactive
     # commands, and a hard ceiling below kidsout's 10 s timeout (REVIEW.1 F-03).
     if args.command == "state":
-        # Defaults MUST match config.example.json: v2 shipped 2/7 in code and
-        # 1.5/4 in the example, so with no config.json the driver ran on a pair
-        # documented nowhere (REVIEW.2 G-07).
+        # Defaults MUST match config.example.json (REVIEW.2 G-07).
         timeout = cfg.get("state_timeout", 1.5)
         deadline = Deadline(cfg.get("state_deadline", 4))
     else:
@@ -1397,14 +1546,14 @@ def main():
     # 'permission denied', which reads as a router-side fault when the real one
     # is a missing file on this machine.
     if not cfg and args.command != "probe":
-        missing = (f"no {os.path.basename(CONFIG_FILE)} — copy config.example.json to "
-                   f"config.json and fill in the rpcd credentials (see DESIGN.md §7).")
+        missing = (f"no {CONFIG_FILE} — copy config.example.json there as config.json, "
+                   f"chmod 600, and fill in the rpcd credentials (see README.md).")
         if args.command == "state":
             # one word on stdout is the contract, local fault or not, and the
             # log is the only diagnostic channel upstream does not discard
             print("unknown")
             log(f"state=unknown error={missing}")
-            print(f"xbox state unknown: {missing}", file=sys.stderr)
+            print(f"{device['id']} state unknown: {missing}", file=sys.stderr)
             sys.exit(1)
         sys.exit(missing)
 

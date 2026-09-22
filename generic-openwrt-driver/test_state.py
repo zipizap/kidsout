@@ -5,26 +5,30 @@ The metric, stated once so the assertions can be derived from it rather than
 from whatever the code happens to do (REVIEW.1 F-07's lesson — v1's test passed
 for the wrong reason and thereby certified broken parsing as correct):
 
-    Let out(t) / in(t) be the router-side accumulator totals `xbox_out` /
-    `xbox_in`: conntrack byte counters of every flow whose original tuple
-    has the console as source, folded into monotonic totals (DESIGN.md §4).
+    Let out(t) / in(t) be the router-side accumulator totals `out` / `in`:
+    conntrack byte counters of every flow whose original tuple has the
+    device as source, folded into monotonic totals (DESIGN.md §4).
 
         rate_out = (out(now) - out(prev)) / (now - prev) * 60   [bytes/minute]
         rate_in  = (in(now)  - in(prev))  / (now - prev) * 60
 
-        up       rate_out > threshold_out_bytes_per_min          (gameplay)
+        up       rate_out > threshold_out_bytes_per_min          (active use)
               OR rate_in  > threshold_in_bytes_per_min           (streaming)
         down     neither
         unknown  rate is not computable: no previous sample, the previous
                  sample is older than max_sample_age_s, the counter went
-                 backwards (reboot/flush), the counter table is missing, or
-                 the router could not be consulted at all
+                 backwards (reboot/reset), the counter keys changed (upgrade),
+                 the counters are not registered, or the router could not be
+                 consulted at all
 
 Both thresholds are strict. threshold_in_bytes_per_min may be absent/null, in
-which case only outbound decides (the rule before 2026-09-21). The inbound rule
-exists because streaming video is almost pure inbound and read 'down' for a
-whole evening; its accepted cost is that a game download in progress also reads
-'up' (see the "download" cases below).
+which case only outbound decides. The inbound rule exists because streaming
+video is almost pure inbound; its accepted cost is that a large download in
+progress also reads 'up' (see the "download" cases below).
+
+The thresholds come from the test fixture (testlib.device), not from any real
+device.json: the shape of the metric is what is under test, the numbers are
+each device's own calibration.
 """
 import json
 import os
@@ -32,7 +36,7 @@ import sys
 import time
 
 from mock_router import MockRouter
-from testlib import Suite, captured, device, load_driver, out_of, tmpdir
+from testlib import TEST_ID, Suite, captured, device, load_driver, out_of, tmpdir
 
 KB = 1024
 
@@ -58,7 +62,7 @@ def state_word(m, fw, dev):
 def main():
     s = Suite("state logic")
 
-    with tmpdir() as tmp, MockRouter() as mock:
+    with tmpdir() as tmp, MockRouter(device_id=TEST_ID) as mock:
         m = load_driver(tmp)
         dev = device()
         fw = lambda: m.Router(mock.config(), dev)
@@ -75,20 +79,20 @@ def main():
             c.eq(rc, 0, "benign unknown is not an error exit")
             c.check(m.load_state().get("counters_ts"), "but a baseline was stored")
 
-        with s.case("console actively used -> up") as c:
+        with s.case("device actively used -> up") as c:
             backdate(m, 60)
             mock.state.add_traffic(out=2 * 1024 * KB, inbound=20 * 1024 * KB)
             word, rc = state_word(m, fw(), dev)
             c.eq(word, "up", "2 MB/min outbound is well above the threshold")
             c.eq(rc, 0, "exit 0")
 
-        with s.case("console idle (standby presence traffic) -> down") as c:
+        with s.case("device idle (standby presence traffic) -> down") as c:
             backdate(m, 60)
             mock.state.add_traffic(out=8 * KB, inbound=12 * KB)
             word, _ = state_word(m, fw(), dev)
-            c.eq(word, "down", "8 KB/min is standby chatter, not play")
+            c.eq(word, "down", "8 KB/min is standby chatter, not use")
 
-        with s.case("console blocked, no traffic at all -> down") as c:
+        with s.case("device blocked, no traffic at all -> down") as c:
             backdate(m, 60)
             word, _ = state_word(m, fw(), dev)
             c.eq(word, "down", "zero bytes")
@@ -98,7 +102,7 @@ def main():
             # cmd_state would add a few milliseconds of real elapsed time, which
             # is enough to move a one-byte margin across the line. The boundary
             # is a property of the metric, so test it where the metric lives.
-            base = {"counters": {"xbox_out": 0, "xbox_in": 0}, "counters_ts": 1000.0}
+            base = {"counters": {"out": 0, "in": 0}, "counters_ts": 1000.0}
             mock.state.reset_counters()
             mock.state.add_traffic(out=threshold)
             st = dict(base)
@@ -122,11 +126,9 @@ def main():
             c.eq(word, "up", "threshold/2 bytes in 30s is above threshold/min")
 
         with s.case("heavy inbound alone counts as 'in use' (streaming)") as c:
-            # Inverted 2026-09-21. This used to assert 'down' ("a download is
-            # not gameplay"), and that is exactly why YouTube read 'down' all
-            # evening: streaming and downloading are indistinguishable by bytes
-            # (huge in, trivial out). The inbound rule accepts that a download
-            # in progress reads 'up' in exchange for metering video.
+            # Streaming and downloading are indistinguishable by bytes (huge
+            # in, trivial out). The inbound rule accepts that a download in
+            # progress reads 'up' in exchange for metering video.
             backdate(m, 60)
             mock.state.add_traffic(out=1 * KB, inbound=200 * 1024 * KB)
             word, _ = state_word(m, fw(), dev)
@@ -134,26 +136,25 @@ def main():
             logged = open(m.LOG_FILE).read().rstrip().splitlines()[-1]
             c.check("by=in" in logged, f"the log names the inbound rule: {logged!r}")
 
-        with s.case("streaming video (calibrated 2026-09-21) -> up via inbound") as c:
-            # Measured on the real console watching YouTube over 60 s ticks:
-            # out 60-80 KB/min (UNDER the outbound line), in 4.4-18 MB/min.
+        with s.case("streaming video: out under the outbound line, in far over -> up via inbound") as c:
+            # Shape of a video stream: outbound about a third of threshold_out,
+            # inbound several times threshold_in.
+            out_b, in_b = threshold // 3, threshold_in * 9
             backdate(m, 60)
-            mock.state.add_traffic(out=70 * KB, inbound=9 * 1024 * KB)
+            mock.state.add_traffic(out=out_b, inbound=in_b)
             word, _ = state_word(m, fw(), dev)
-            c.eq(word, "up", "70 KB/min out + 9 MB/min in is a video stream")
-            verdict, by = m.verdict_for(70 * KB, 9 * 1024 * KB, dev["state"])
+            c.eq(word, "up", "a video stream is 'in use'")
+            verdict, by = m.verdict_for(out_b, in_b, dev["state"])
             c.eq((verdict, by), ("up", "in"), "and it is the inbound rule that fires")
 
-        with s.case("idle dashboard (calibrated) -> down under both rules") as c:
-            # idle / dashboard: 20.8 KB/min out, 23 KB/min in. The inbound
-            # floor must sit far above dashboard tile chatter or the console
-            # would read 'up' whenever it is merely switched on.
+        with s.case("idle dashboard chatter -> down under both rules") as c:
+            # Idle: a few percent of either threshold. The inbound floor must
+            # sit far above idle chatter or the device would read 'up'
+            # whenever it is merely switched on.
             backdate(m, 60)
-            mock.state.add_traffic(out=int(20.8 * KB), inbound=23 * KB)
+            mock.state.add_traffic(out=threshold // 10, inbound=threshold_in // 40)
             word, _ = state_word(m, fw(), dev)
-            c.eq(word, "down", "dashboard chatter is not use")
-            c.check(threshold_in >= 20 * 23 * KB,
-                    f"inbound floor {threshold_in/1024:.0f} KB/min keeps >=20x margin over idle")
+            c.eq(word, "down", "idle chatter is not use")
 
         with s.case("inbound threshold boundary is strict") as c:
             v, by = m.verdict_for(0, threshold_in, dev["state"])
@@ -161,9 +162,9 @@ def main():
             v, by = m.verdict_for(0, threshold_in + 1, dev["state"])
             c.eq((v, by), ("up", "in"), "one byte over the inbound threshold is 'up'")
             v, by = m.verdict_for(threshold + 1, threshold_in + 1, dev["state"])
-            c.eq(by, "out", "when both fire, outbound (gameplay) is the reported reason")
+            c.eq(by, "out", "when both fire, outbound (active use) is the reported reason")
 
-        with s.case("no inbound threshold -> legacy outbound-only rule") as c:
+        with s.case("no inbound threshold -> outbound-only rule") as c:
             legacy = dict(dev["state"])
             del legacy["threshold_in_bytes_per_min"]
             c.eq(m.verdict_for(1 * KB, 200 * 1024 * KB, legacy), ("down", None),
@@ -191,11 +192,11 @@ def main():
             word, _ = state_word(m, fw(), dev)
             c.eq(word, "unknown", "an hour of bytes must not be divided into one minute")
 
-        with s.case("missing counter table -> unknown and self-heals") as c:
+        with s.case("missing counter registration -> unknown and self-heals") as c:
             mock.state.counters_installed = False
             word, _ = state_word(m, fw(), dev)
             c.eq(word, "unknown", "cannot measure")
-            c.check(mock.state.counters_installed, "the table was recreated for the next tick")
+            c.check(mock.state.counters_installed, "the registration was recreated for the next tick")
 
         # ------------------------------------------------------------------ #
         with s.case("stdout is always exactly one word") as c:
@@ -236,13 +237,14 @@ def main():
             c.check("audit:" in logged, "an audit line was written")
             c.check("internet BLOCKED" in logged,
                     "recording what the router is actually enforcing")
+            c.check(f"kidsout_{TEST_ID}_out" in logged, "and which rule it is")
 
         # ---- REVIEW.2 G-04: monotonicity is a guarantee, not an assumption - #
         with s.case("counters going backwards -> unknown, then re-baseline (G-04)") as c:
             # The helper accumulates router-side precisely so this cannot
             # happen: a naive conntrack sum DOES go backwards when flows expire
-            # (measured at -510 KB/min during real gameplay). If the guarantee
-            # is ever violated the driver must say 'unknown', not compute a
+            # (measured at -510 KB/min during real use). If the guarantee is
+            # ever violated the driver must say 'unknown', not compute a
             # negative rate and call it 'down'.
             st = fresh_state()
             mock.state.reset_counters()
@@ -263,21 +265,45 @@ def main():
             c.check(reason2 is None, f"re-baselined cleanly: {reason2!r}")
             c.check(rate2 is not None and rate2 > 0, f"positive rate again: {rate2}")
 
-        with s.case("the v3 key/value counters shape is parsed (G-01)") as c:
+        with s.case("the helper's key/value counters shape is parsed (G-01)") as c:
             mock.state.counters_installed = True
             mock.state.counter_addrs = ["192.168.2.172"]
             mock.state.reset_counters()
             mock.state.add_traffic(out=12345, inbound=678)
             vals = m.read_counters(fw())
-            c.check(vals.get("xbox_out") == 12345, f"xbox_out parsed: {vals}")
-            c.check(vals.get("xbox_in") == 678, f"xbox_in parsed: {vals}")
+            c.eq(vals, {"out": 12345, "in": 678}, "out/in parsed")
 
-        with s.case("a download reads 'up' via the inbound rule, not outbound (calibrated)") as c:
-            # Measured on the real console: a 12 MB/min download produced only
-            # 93.7 KB/min OUTBOUND, while gameplay produced 289.5 KB/min. The
-            # outbound threshold sits between them, and that margin is still
-            # asserted here. Since 2026-09-21 the download nevertheless reads
-            # 'up' -- through the INBOUND rule -- because it is byte-for-byte
+        with s.case("a pre-generic helper's '<id>_out' keys are accepted and normalised") as c:
+            mock.state.legacy_keys = True
+            try:
+                vals = m.read_counters(fw())
+                c.eq(vals, {"out": 12345, "in": 678}, "normalised to out/in")
+                logged = open(m.LOG_FILE).read()
+                c.check("--helper-only" in logged,
+                        "the log tells the operator how to refresh the helper")
+            finally:
+                mock.state.legacy_keys = False
+
+        with s.case("a stored sample with old key names -> unknown, not a giant false 'up'") as c:
+            # The pre-generic driver stored {"xbox_out":..,"xbox_in":..}. Diffing
+            # the new {"out":..} against it would compare the whole total with a
+            # missing key (0) and report megabytes per minute.
+            st = {"counters": {f"{TEST_ID}_out": 12000, f"{TEST_ID}_in": 600},
+                  "counters_ts": 1000.0}
+            rate_out, _rin, reason = m.sample_rate(fw(), dev, st, now=1060.0)
+            c.check(rate_out is None, "no rate from mismatched keys")
+            c.check(reason and "keys changed" in reason, f"reason explains: {reason!r}")
+            c.eq(set(st["counters"]), {"out", "in"}, "the new sample is stored as the baseline")
+            mock.state.add_traffic(out=100)
+            rate2, _i, reason2 = m.sample_rate(fw(), dev, st, now=1120.0)
+            c.check(reason2 is None and rate2 == 100.0, f"next tick is normal: {rate2}, {reason2!r}")
+
+        with s.case("a download reads 'up' via the inbound rule, not outbound") as c:
+            # Shape of a download: outbound well under threshold_out (about
+            # half), inbound an order of magnitude over threshold_in. The
+            # outbound margin that separates active use from a download is
+            # still asserted; the verdict is nevertheless 'up' -- through the
+            # INBOUND rule -- because a download is byte-for-byte
             # indistinguishable from streaming video. Accepted trade-off.
             st = fresh_state()
             mock.state.reset_counters()
@@ -285,14 +311,13 @@ def main():
             mock.state.counter_addrs = ["192.168.2.172"]
             with captured():
                 m.sample_rate(fw(), dev, st, now=2000.0)
-            mock.state.add_traffic(out=int(93.7 * 1024), inbound=12 * 1024 * 1024)
+            mock.state.add_traffic(out=threshold // 2, inbound=threshold_in * 12)
             rate_out, rate_in, reason = m.sample_rate(fw(), dev, st, now=2060.0)
             c.check(reason is None, f"rate computed: {reason!r}")
-            thr = dev["state"]["threshold_out_bytes_per_min"]
-            c.check(rate_out < thr,
+            c.check(rate_out < threshold,
                     f"download outbound {rate_out/1024:.1f} KB/min stays under "
-                    f"{thr/1024:.0f} KB/min (outbound alone would say down)")
-            c.check(rate_in > thr * 10, "…even though inbound is enormous")
+                    f"{threshold/1024:.0f} KB/min (outbound alone would say down)")
+            c.check(rate_in > threshold * 10, "…even though inbound is enormous")
             c.eq(m.verdict_for(rate_out, rate_in, dev["state"]), ("up", "in"),
                  "so the verdict is 'up', and only because of inbound")
 

@@ -1,11 +1,19 @@
 #!/bin/sh
 # ---------------------------------------------------------------------------
-# kidsout xbox — one-time router-side bootstrap.   RUN THIS ON THE ROUTER.
+# kidsout generic OpenWrt driver — per-device router-side bootstrap.
+# RUN THIS ON THE ROUTER, ONCE PER DEVICE.
+#
+#   sh /tmp/router_bootstrap.sh <id>                 full install (prompts for a password)
+#   sh /tmp/router_bootstrap.sh <id> --helper-only   refresh helper + ACL only, no prompt
+#   sh /tmp/router_bootstrap.sh <id> --uninstall     remove this device's artefacts only
+#
+# <id> is the `id` in the device's device.json (= its devices/<name>/ directory
+# name): lowercase letters and digits, e.g. xbox, nintendoswitch2.
 #
 # Upload it, then run it INTERACTIVELY — two separate commands:
 #
-#   ssh root@192.168.2.1 'cat > /tmp/router_bootstrap.sh' < router_bootstrap.sh
-#   ssh -t root@192.168.2.1 sh /tmp/router_bootstrap.sh
+#   ssh root@<router> 'cat > /tmp/router_bootstrap.sh' < router_bootstrap.sh
+#   ssh -t root@<router> sh /tmp/router_bootstrap.sh <id>
 #
 # Do NOT pipe the script into ssh (`ssh -t ... 'sh -s' < router_bootstrap.sh`).
 # ssh refuses to allocate a pseudo-terminal when its stdin is a redirect, so
@@ -16,12 +24,17 @@
 # `scp` may not work either: OpenWrt images without openssh-sftp-server have no
 # /usr/libexec/sftp-server, which is why the upload above uses `cat >`.
 #
-# It installs three things and nothing else:
+# It installs three things for the named device and nothing else:
 #
-#   1. /usr/libexec/kidsout-xbox            a fixed-verb privileged helper
-#   2. /usr/share/rpcd/acl.d/kidsout-xbox.json   an ACL scoped to that helper
-#                                           plus read/write on uci 'firewall'
-#   3. a 'kidsout' rpcd login in /etc/config/rpcd, password of your choosing
+#   1. /usr/libexec/kidsout-<id>                 a fixed-verb privileged helper
+#   2. /usr/share/rpcd/acl.d/kidsout-<id>.json   an ACL scoped to that helper
+#                                                plus read/write on uci 'firewall'
+#   3. a 'kidsout-<id>' rpcd login in /etc/config/rpcd, password of your choosing
+#
+# Every artefact carries the device id, so several devices coexist on one
+# router without touching each other's helper, login, ACL or accumulator.
+# The helper is byte-identical for every device: it derives the id from its
+# own file name, so refreshing it for one device changes nothing for another.
 #
 # Why a helper instead of granting `file exec` on nft/conntrack directly:
 # rpcd's file-exec ACL authorises a *command path*, not its arguments, and
@@ -32,24 +45,47 @@
 # credential can toggle the kidsout rules and read counters, and no more.
 #
 # Nothing here touches your existing firewall rules, users, or any other
-# config. To undo everything: sh /tmp/router_bootstrap.sh --uninstall
+# config. To undo one device: sh /tmp/router_bootstrap.sh <id> --uninstall
+# (remove its firewall rule first with './driver.sh uninstall' from kidsout).
 # ---------------------------------------------------------------------------
 set -u
 
-HELPER=/usr/libexec/kidsout-xbox
-ACL=/usr/share/rpcd/acl.d/kidsout-xbox.json
-RPCD_USER=kidsout
+ID="${1:-}"
+MODE="${2:-}"
 
-say() { echo "[bootstrap] $*"; }
-die() { echo "[bootstrap] ERROR: $*" >&2; exit 1; }
+say() { echo "[bootstrap ${ID:-?}] $*"; }
+die() { echo "[bootstrap ${ID:-?}] ERROR: $*" >&2; exit 1; }
+
+usage() {
+	echo "usage: sh $0 <id> [--helper-only|--uninstall]" >&2
+	echo "       <id> = device.json 'id': lowercase letters/digits, e.g. xbox" >&2
+	exit 2
+}
+
+[ -n "$ID" ] || usage
+case "$ID" in
+--*) usage ;;
+*[!a-z0-9]* | [!a-z]*) die "bad id '$ID': lowercase letters and digits only, starting with a letter" ;;
+esac
+case "$MODE" in
+"" | --helper-only | --uninstall) : ;;
+*) usage ;;
+esac
 
 [ "$(id -u)" = "0" ] || die "must run as root on the router"
 
+HELPER=/usr/libexec/kidsout-$ID
+ACL=/usr/share/rpcd/acl.d/kidsout-$ID.json
+ACL_GROUP=kidsout-$ID
+RPCD_USER=kidsout-$ID
+STATE=/tmp/kidsout-$ID.acct
+ADDRS=/tmp/kidsout-$ID.addrs
+
 # --------------------------------------------------------------------------- #
-# uninstall
+# uninstall — THIS device's artefacts only
 # --------------------------------------------------------------------------- #
-if [ "${1:-}" = "--uninstall" ]; then
-	say "removing helper, ACL and rpcd login"
+if [ "$MODE" = "--uninstall" ]; then
+	say "removing helper, ACL, rpcd login, accumulator state and system user"
 	rm -f "$HELPER" "$ACL"
 	# only remove OUR login section, never any other login
 	i=0
@@ -62,58 +98,68 @@ if [ "${1:-}" = "--uninstall" ]; then
 	done
 	uci commit rpcd
 	/etc/init.d/rpcd restart
-	nft delete table inet kidsout 2>/dev/null   # pre-v3 accounting table, if present
-	rm -f /tmp/kidsout-xbox.acct /tmp/kidsout-xbox.addrs
+	rm -f "$STATE" "$ADDRS"
 	# Edit in place via a mode-preserving copy. The obvious
 	# `grep -v ... > tmp && mv tmp "$f"` gives the replacement file the
 	# shell's umask, which would drop /etc/shadow from 0600 to 0644 and
-	# expose every account's hash (REVIEW.2 S2-01).
+	# expose every account's hash (REVIEW.2 S2-01). The ':' anchor keeps
+	# 'kidsout-xbox:' from matching 'kidsout-xbox2:'.
 	for f in /etc/passwd /etc/group /etc/shadow; do
 		[ -f "$f" ] || continue
-		cp -p "$f" "$f.kidsout.bak" || continue
-		if grep -v "^${RPCD_USER}:" "$f.kidsout.bak" > "$f"; then
-			rm -f "$f.kidsout.bak"
+		cp -p "$f" "$f.$RPCD_USER.bak" || continue
+		if grep -v "^${RPCD_USER}:" "$f.$RPCD_USER.bak" > "$f"; then
+			rm -f "$f.$RPCD_USER.bak"
 		else
-			cat "$f.kidsout.bak" > "$f"; rm -f "$f.kidsout.bak"
+			cat "$f.$RPCD_USER.bak" > "$f"; rm -f "$f.$RPCD_USER.bak"
 		fi
 	done
-	say "done. helper, ACL, rpcd login, accounting state and the '$RPCD_USER' user removed."
+	say "done. helper, ACL, rpcd login, accumulator state and the '$RPCD_USER' user removed."
+	say "NOT removed: the firewall rule kidsout_${ID}_out (run './driver.sh uninstall' from kidsout)."
 	say "file modes after edit (shadow must be 600):"
-	ls -l /etc/shadow 2>/dev/null | sed 's/^/    /' 
+	ls -l /etc/shadow 2>/dev/null | sed 's/^/    /'
 	exit 0
 fi
 
 # --------------------------------------------------------------------------- #
-# 1. the helper
+# 1. the helper  (identical for every device; the id comes from its file name)
 # --------------------------------------------------------------------------- #
 say "installing $HELPER"
 mkdir -p /usr/libexec
 cat > "$HELPER" <<'HELPER_EOF'
 #!/bin/sh
-# kidsout xbox privileged helper. Invoked by rpcd `file exec` with a fixed
-# verb and validated arguments; never with a shell, so argv is not parsed.
+# kidsout per-device privileged helper. Invoked by rpcd `file exec` with a
+# fixed verb and validated arguments; never with a shell, so argv is not
+# parsed. The device id is the suffix of this file's own name
+# (/usr/libexec/kidsout-<id>), so the file is byte-identical for every device
+# and each one keeps its own accumulator state.
 #
 #   info                       router facts: fw3/fw4, offload, conntrack tools
-#   counters                   monotonic byte totals for the console
-#   counters-install ADDR...   register the console's addresses, reset totals
-#   counters-remove            forget the console; drop accumulator state
+#   counters                   monotonic byte totals for the device ("out N" / "in N")
+#   counters-install ADDR...   register the device's addresses, reset totals
+#   counters-remove            forget the device; drop accumulator state
 #   flush ADDR [ADDR...]       drop conntrack entries for the given addresses
 #   neigh                      ipv4 + ipv6 neighbour table
 #   leases                     /tmp/dhcp.leases
 #
 # WHY CONNTRACK AND NOT AN NFT COUNTER (REVIEW.2 G-01)
-# This router runs fw4 with flow_offloading_hw=1 on a MediaTek PPE. Offloaded
-# flows are forwarded in silicon and never enter ANY netfilter hook, so an nft
+# Routers running fw4 with flow_offloading_hw=1 (e.g. MediaTek PPE) forward
+# offloaded flows in silicon; they never enter ANY netfilter hook, so an nft
 # counter in the forward hook (or at netdev ingress) sees only each flow's
-# first few packets and under-reports gameplay by ~98%. fw4 declares its
-# flowtable with `counter`, so the hardware's per-flow MIB is fed back into
-# conntrack instead -- verified on this SoC: 9 of 9 offloaded flows gained
-# bytes over 20s. Conntrack is therefore a byte source offload cannot blind,
-# and it needs no nft table, no device names and no extra package.
+# first few packets and under-reports by ~98%. fw4 declares its flowtable
+# with `counter`, so the hardware's per-flow MIB is fed back into conntrack
+# instead -- verified on such a SoC: 9 of 9 offloaded flows gained bytes
+# over 20s. Conntrack is therefore a byte source offload cannot blind, and
+# it needs no nft table, no device names and no extra package.
 set -u
 
-STATE=/tmp/kidsout-xbox.acct     # tmpfs: no flash wear, cleared on reboot
-ADDRS=/tmp/kidsout-xbox.addrs
+me=${0##*/}
+ID=${me#kidsout-}
+if [ -z "$ID" ] || [ "$ID" = "$me" ]; then
+	echo "helper must be installed as /usr/libexec/kidsout-<id>, got $0" >&2
+	exit 2
+fi
+STATE=/tmp/kidsout-$ID.acct     # tmpfs: no flash wear, cleared on reboot
+ADDRS=/tmp/kidsout-$ID.addrs
 
 valid_mac() {
 	case "$1" in
@@ -136,18 +182,19 @@ valid_addr() {
 have() { command -v "$1" >/dev/null 2>&1; }
 
 verb="${1:-}"
-[ -n "$verb" ] || { echo "usage: kidsout-xbox <verb> [args]" >&2; exit 2; }
+[ -n "$verb" ] || { echo "usage: $me <verb> [args]" >&2; exit 2; }
 shift
 
 case "$verb" in
 info)
+	echo "device=$ID"
 	if have fw4; then echo "firewall=fw4"; elif have fw3; then echo "firewall=fw3"; else echo "firewall=unknown"; fi
 	if have nft; then echo "nft=yes"; else echo "nft=no"; fi
 	if have conntrack; then echo "conntrack_tools=yes"; else echo "conntrack_tools=no"; fi
 	[ -r /proc/net/nf_conntrack ] && echo "proc_nf_conntrack=yes" || echo "proc_nf_conntrack=no"
 	echo "ct_acct=$(cat /proc/sys/net/netfilter/nf_conntrack_acct 2>/dev/null || echo unknown)"
-	# The three facts the accounting design depends on. If a firmware upgrade
-	# ever changes them, this is what makes it visible in xbox.log rather than
+	# The facts the accounting design depends on. If a firmware upgrade ever
+	# changes them, this is what makes it visible in driver.log rather than
 	# showing up as a silent permanent 'down' (REVIEW.2 Q4).
 	if nft list flowtable inet fw4 ft 2>/dev/null | grep -q "counter"; then
 		echo "flowtable_counter=yes"
@@ -173,7 +220,7 @@ counters)
 	#
 	# A sum over live flows is NOT a counter: entries vanish when a flow
 	# expires and take their bytes with them, so a naive sum goes DOWN.
-	# Measured during real gameplay it produced -510 KB/min (REVIEW.2 G-04).
+	# Measured during real use it produced -510 KB/min (REVIEW.2 G-04).
 	# So: for each flow still present, add only what it gained since we last
 	# looked; for a flow we have not seen before, add all of it; a flow that
 	# disappeared simply stops contributing. The running total never
@@ -243,9 +290,9 @@ counters)
 		for (k in seen) printf "%s %d %d\n", k, co[k], ci[k] >> tmp
 		close(tmp)
 		system("mv " tmp " " statefile)
-		printf "xbox_out %d\n", tot_out
-		printf "xbox_in %d\n",  tot_in
-		printf "source %s\n",   src
+		printf "out %d\n", tot_out
+		printf "in %d\n",  tot_in
+		printf "source %s\n", src
 	}'
 	;;
 
@@ -259,8 +306,6 @@ counters-install)
 	new=$(for a in "$@"; do echo "$a"; done | sort -u)
 	old=$(sort -u "$ADDRS" 2>/dev/null)
 	if [ "$new" = "$old" ]; then
-		# Same address set: leave the accumulator alone so a re-install does
-		# not cost the driver an 'unknown' tick.
 		echo "unchanged"
 		exit 0
 	fi
@@ -294,8 +339,7 @@ flush)
 	;;
 
 neigh)
-	# 'ip neigh show' already covers both families; adding 'ip -6 neigh show'
-	# listed every IPv6 neighbour twice.
+	# 'ip neigh show' already covers both families.
 	ip neigh show 2>/dev/null
 	;;
 
@@ -312,14 +356,14 @@ HELPER_EOF
 chmod 755 "$HELPER"
 
 # --------------------------------------------------------------------------- #
-# 2. the ACL
+# 2. the ACL  (unquoted heredoc on purpose: $ACL_GROUP/$HELPER/$ID expand)
 # --------------------------------------------------------------------------- #
 say "installing $ACL"
 mkdir -p /usr/share/rpcd/acl.d
-cat > "$ACL" <<'ACL_EOF'
+cat > "$ACL" <<ACL_EOF
 {
-	"kidsout-xbox": {
-		"description": "kidsout xbox device driver: toggle its own firewall rules, read its own traffic counters",
+	"$ACL_GROUP": {
+		"description": "kidsout device '$ID': toggle its own firewall rule, read its own traffic counters",
 		"read": {
 			"ubus": {
 				"session": [ "access", "login" ],
@@ -329,7 +373,7 @@ cat > "$ACL" <<'ACL_EOF'
 			},
 			"uci": [ "firewall" ],
 			"file": {
-				"/usr/libexec/kidsout-xbox": [ "exec" ]
+				"$HELPER": [ "exec" ]
 			}
 		},
 		"write": {
@@ -339,7 +383,7 @@ cat > "$ACL" <<'ACL_EOF'
 			},
 			"uci": [ "firewall" ],
 			"file": {
-				"/usr/libexec/kidsout-xbox": [ "exec" ]
+				"$HELPER": [ "exec" ]
 			}
 		}
 	}
@@ -347,19 +391,60 @@ cat > "$ACL" <<'ACL_EOF'
 ACL_EOF
 chmod 644 "$ACL"
 
+# Warn about a login that reaches this ACL under a different username (e.g.
+# the single 'kidsout' user of the pre-generic Xbox install). It keeps working
+# with identical powers; remove it once config.json uses $RPCD_USER.
+i=0
+while uci -q get "rpcd.@login[$i]" >/dev/null 2>&1; do
+	u="$(uci -q get "rpcd.@login[$i].username")"
+	if [ "$u" != "$RPCD_USER" ] && uci -q get "rpcd.@login[$i].read" | tr ' ' '\n' | grep -qx "$ACL_GROUP"; then
+		say "NOTE: rpcd login '$u' (rpcd.@login[$i]) also grants '$ACL_GROUP'. Once config.json"
+		say "      uses username=$RPCD_USER, remove it:  uci delete rpcd.@login[$i]; uci commit rpcd;"
+		say "      /etc/init.d/rpcd restart; and drop user '$u' from /etc/passwd, /etc/group, /etc/shadow."
+	fi
+	i=$((i + 1))
+done
+
+if [ "$MODE" = "--helper-only" ]; then
+	found=0
+	i=0
+	while uci -q get "rpcd.@login[$i]" >/dev/null 2>&1; do
+		[ "$(uci -q get "rpcd.@login[$i].username")" = "$RPCD_USER" ] && found=1
+		i=$((i + 1))
+	done
+	/etc/init.d/rpcd restart
+	sleep 1
+	printf '\n'
+	say "helper and ACL refreshed; accumulator state in $STATE preserved."
+	"$HELPER" info | sed 's/^/    /'
+	if [ "$found" = 0 ]; then
+		say "WARNING: no rpcd login '$RPCD_USER' exists. Either config.json uses another"
+		say "         username that grants '$ACL_GROUP', or run a full bootstrap: sh $0 $ID"
+	fi
+	exit 0
+fi
+
 # --------------------------------------------------------------------------- #
 # 3. the rpcd login
 # --------------------------------------------------------------------------- #
 printf '\n'
 say "creating the login-less system user '$RPCD_USER'"
-# This router has no cryptpw/mkpasswd/openssl, so a password hash cannot be
+# Many routers have no cryptpw/mkpasswd/openssl, so a password hash cannot be
 # computed here. rpcd's '$p$<user>' form defers to /etc/shadow instead, which is
 # the same mechanism the existing root login uses. It also means THIS SCRIPT
 # NEVER HANDLES THE PASSWORD: passwd(1) prompts you for it directly.
-grep -q "^${RPCD_USER}:" /etc/passwd 2>/dev/null ||
-	echo "${RPCD_USER}:x:6000:6000:kidsout rpcd:/var:/bin/false" >> /etc/passwd
+#
+# uid/gid: the first free number from 6000, so a second device does not share
+# the first one's uid.
+if grep -q "^${RPCD_USER}:" /etc/passwd 2>/dev/null; then
+	UID_=$(awk -F: -v u="$RPCD_USER" '$1==u{print $3}' /etc/passwd)
+else
+	UID_=$(awk -F: '$3>=6000 && $3<7000 {u[$3]=1} END{for(i=6000;i<7000;i++) if(!(i in u)){print i;exit}}' /etc/passwd /etc/group)
+	[ -n "$UID_" ] || die "no free uid in 6000-6999"
+	echo "${RPCD_USER}:x:${UID_}:${UID_}:kidsout rpcd ($ID):/var:/bin/false" >> /etc/passwd
+fi
 grep -q "^${RPCD_USER}:" /etc/group 2>/dev/null ||
-	echo "${RPCD_USER}:x:6000:" >> /etc/group
+	echo "${RPCD_USER}:x:${UID_}:" >> /etc/group
 
 # Create the /etc/shadow entry BEFORE calling passwd(1). Without it busybox
 # passwd prints "no record of <user> in /etc/shadow, using /etc/passwd" and
@@ -378,14 +463,14 @@ case "$pwfield" in
 x | "!" | "*" | "") : ;;
 *)
 	say "moving an exposed password hash out of world-readable /etc/passwd"
-	cp -p /etc/shadow /etc/shadow.kidsout.bak
+	cp -p /etc/shadow /etc/shadow.$RPCD_USER.bak
 	awk -F: -v u="$RPCD_USER" -v h="$pwfield" 'BEGIN{OFS=":"}
-		$1==u{$2=h} {print}' /etc/shadow.kidsout.bak > /etc/shadow
-	rm -f /etc/shadow.kidsout.bak
-	cp -p /etc/passwd /etc/passwd.kidsout.bak
+		$1==u{$2=h} {print}' /etc/shadow.$RPCD_USER.bak > /etc/shadow
+	rm -f /etc/shadow.$RPCD_USER.bak
+	cp -p /etc/passwd /etc/passwd.$RPCD_USER.bak
 	awk -F: -v u="$RPCD_USER" 'BEGIN{OFS=":"} $1==u{$2="x"} {print}' \
-		/etc/passwd.kidsout.bak > /etc/passwd
-	rm -f /etc/passwd.kidsout.bak
+		/etc/passwd.$RPCD_USER.bak > /etc/passwd
+	rm -f /etc/passwd.$RPCD_USER.bak
 	say "NOTE: that hash was readable by anyone on the router. Set a NEW password now."
 	;;
 esac
@@ -393,13 +478,13 @@ esac
 printf '\n'
 say "set the password for '$RPCD_USER' — you will be prompted twice."
 say "this is NOT the router root password. Pick a fresh one, and put the same"
-say "value into devices/xbox/xbox-openwrt-driver/config.json on the machine"
-say "that runs kidsout."
+say "value into devices/$ID/generic-openwrt-driver_files/config.json on the"
+say "machine that runs kidsout (username: $RPCD_USER)."
 printf '\n'
 passwd "$RPCD_USER" < /dev/tty || die "passwd failed; '$RPCD_USER' has no password"
 STORED="\$p\$${RPCD_USER}"
 
-# replace any existing kidsout login section, leave every other login alone
+# replace any existing login section for this user, leave every other login alone
 i=0
 while uci -q get "rpcd.@login[$i]" >/dev/null 2>&1; do
 	if [ "$(uci -q get "rpcd.@login[$i].username")" = "$RPCD_USER" ]; then
@@ -411,8 +496,8 @@ done
 S="$(uci add rpcd login)"
 uci set "rpcd.$S.username=$RPCD_USER"
 uci set "rpcd.$S.password=$STORED"
-uci add_list "rpcd.$S.read=kidsout-xbox"
-uci add_list "rpcd.$S.write=kidsout-xbox"
+uci add_list "rpcd.$S.read=$ACL_GROUP"
+uci add_list "rpcd.$S.write=$ACL_GROUP"
 uci commit rpcd
 say "rpcd login '$RPCD_USER' written to /etc/config/rpcd"
 
@@ -423,9 +508,9 @@ sleep 1
 # 4. conntrack CLI (OpenWrt package 'conntrack' — NOT 'conntrack-tools', which does not exist)
 # --------------------------------------------------------------------------- #
 # Without it the block cannot cut a session already in progress: fw4's forward
-# chain accepts established flows before any user rule, and this router's
-# established-TCP timeout is 7440 s. "Blocked" would mean "blocked within two
-# hours" for whoever is already mid-game.
+# chain accepts established flows before any user rule, and the established-TCP
+# timeout is typically 7440 s. "Blocked" would mean "blocked within two hours"
+# for whoever is already mid-session.
 if command -v conntrack >/dev/null 2>&1; then
 	say "conntrack CLI already installed"
 else
@@ -435,8 +520,8 @@ else
 		say "conntrack installed"
 	else
 		say "WARNING: could not install package conntrack. Blocking will still stop"
-		say "         NEW connections, but a game already running survives for up"
-		say "         to 2 hours. Install it by hand, then re-run ./xbox.py selftest."
+		say "         NEW connections, but a session already running survives for up"
+		say "         to 2 hours. Install it by hand, then re-run ./driver.sh selftest."
 	fi
 fi
 
@@ -447,7 +532,7 @@ printf '\n'
 say "router facts (feed these back to the driver):"
 "$HELPER" info | sed 's/^/    /'
 printf '\n'
-say "done. Next, on the kidsout machine:"
-say "  cp config.example.json config.json && chmod 600 config.json"
+say "done. Next, on the kidsout machine, in devices/$ID/generic-openwrt-driver_files/:"
+say "  cp ../../../generic-openwrt-driver/config.example.json config.json && chmod 600 config.json"
 say "  # set username=$RPCD_USER and the password you just chose"
-say "  ./xbox.py selftest"
+say "  ./driver.sh selftest"

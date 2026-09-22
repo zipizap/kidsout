@@ -1,16 +1,23 @@
 #!/usr/bin/env python3
 """
-Mock OpenWrt rpcd ubus-over-HTTP server, for offline testing of xbox.py.
+Mock OpenWrt rpcd ubus-over-HTTP server, for offline testing of driver.py.
 
 Emulates the subset the driver uses:
 
     session login / list
     uci get / set / add / delete / commit / apply / revert   (in-memory firewall)
-    file exec  of /usr/libexec/kidsout-xbox                  (the router helper)
+    file exec  of /usr/libexec/kidsout-<id>                  (the router helper)
     system board
 
-and — unlike the v1 mock, which only modelled the happy path and so let every
-failure-mode claim in the docs go unverified — it can be told to fail:
+Like the real router it is MULTI-TENANT: any /usr/libexec/kidsout-<id> path is
+accepted and each id gets its own counters, registered addresses and flush
+log, so a test can run two devices against one mock and prove they do not
+interfere. `mock.state` exposes the PRIMARY device's tenant directly
+(`counters`, `counters_installed`, `counter_addrs`, `flushed`); use
+`mock.state.tenant("<id>")` for another one.
+
+Unlike the v1 mock, which only modelled the happy path and so let every
+failure-mode claim in the docs go unverified, it can be told to fail:
 
     mock.state.fail = "http404"       serve 404 on the ubus path
     mock.state.fail = "badjson"       serve junk instead of JSON-RPC
@@ -20,15 +27,16 @@ failure-mode claim in the docs go unverified — it can be told to fail:
     mock.state.fail = "nocounters"    helper reports the accounting table missing
     mock.state.fail = "noconntrack"   helper reports the conntrack CLI missing
     mock.state.slow = 5.0             delay every response by N seconds
+    mock.state.legacy_keys = True     helper prints "<id>_out" like a pre-generic install
 
 Use as a library (preferred, for tests):
 
     from mock_router import MockRouter
-    with MockRouter() as mock:          # random port, TLS
+    with MockRouter(device_id="testdev") as mock:      # random port, TLS
         mock.state.add_traffic(out=1_000_000)
         ...
 
-or standalone:  python3 mock_router.py [port]
+or standalone:  python3 mock_router.py [port] [device_id]
 """
 import atexit
 import json
@@ -43,16 +51,43 @@ import threading
 import time
 import http.server
 
-HELPER = "/usr/libexec/kidsout-xbox"
+HELPER_DIR = "/usr/libexec/"
+HELPER_PREFIX = "kidsout-"
+
+
+def helper_path(device_id):
+    return f"{HELPER_DIR}{HELPER_PREFIX}{device_id}"
+
+
+def owns_section(prefix, name):
+    """Same boundary rule as driver.owns_section: `prefix` or `prefix_...`."""
+    return name == prefix or name.startswith(prefix + "_")
+
+
+class Tenant:
+    """Router-side state that belongs to ONE device's helper."""
+
+    def __init__(self, device_id):
+        self.id = device_id
+        self.counters = {"out": 0, "in": 0}
+        self.counters_installed = False
+        self.counter_addrs = []
+        self.flushed = []
 
 
 class MockState:
     """Everything the mock router pretends to be."""
 
-    def __init__(self):
+    def __init__(self, device_id="testdev"):
         self.lock = threading.Lock()
+        self.device_id = device_id
+        self.helper = helper_path(device_id)
+        self.acl_group = f"kidsout-{device_id}"
+        self.username = f"kidsout-{device_id}"
+        self.prefix = f"kidsout_{device_id}"
         self.fail = None
         self.slow = 0.0
+        self.legacy_keys = False
         self.password = "test"
         self.sessions = {}
         self.calls = []                     # every (obj, method) seen, for assertions
@@ -65,30 +100,75 @@ class MockState:
         self.uncommitted = {}
         self.commits = 0
         self.applies = 0
-        self.counters = {"xbox_out": 0, "xbox_in": 0}
-        self.counters_installed = False
-        self.counter_addrs = []
-        self.flushed = []
-        self.leases = "1690000000 aa:bb:cc:dd:ee:ff 192.168.2.172 xbox 01:aa:bb:cc:dd:ee:ff\n"
+        self.tenants = {device_id: Tenant(device_id)}
+        self.leases = (f"1690000000 aa:bb:cc:dd:ee:ff 192.168.2.172 "
+                       f"{device_id.upper()} 01:aa:bb:cc:dd:ee:ff\n")
         self.neigh = (
             "192.168.2.172 dev br-lan lladdr aa:bb:cc:dd:ee:ff REACHABLE\n"
             "192.168.2.50 dev br-lan lladdr 11:22:33:44:55:66 STALE\n"
             "2a01:db8::172 dev br-lan lladdr aa:bb:cc:dd:ee:ff REACHABLE\n"
         )
 
+    # ---- tenants ------------------------------------------------------- #
+    def tenant(self, device_id=None):
+        device_id = device_id or self.device_id
+        with self.lock:
+            return self.tenants.setdefault(device_id, Tenant(device_id))
+
+    def tenant_for_path(self, cmd):
+        """The tenant a `file exec` command path belongs to, or None."""
+        if not cmd.startswith(HELPER_DIR + HELPER_PREFIX):
+            return None
+        dev_id = cmd[len(HELPER_DIR) + len(HELPER_PREFIX):]
+        if not re.fullmatch(r"[a-z][a-z0-9]*", dev_id):
+            return None
+        return self.tenant(dev_id)
+
+    # primary-tenant conveniences, so existing tests read naturally
+    @property
+    def counters(self):
+        return self.tenant().counters
+
+    @counters.setter
+    def counters(self, v):
+        self.tenant().counters = v
+
+    @property
+    def counters_installed(self):
+        return self.tenant().counters_installed
+
+    @counters_installed.setter
+    def counters_installed(self, v):
+        self.tenant().counters_installed = v
+
+    @property
+    def counter_addrs(self):
+        return self.tenant().counter_addrs
+
+    @counter_addrs.setter
+    def counter_addrs(self, v):
+        self.tenant().counter_addrs = v
+
+    @property
+    def flushed(self):
+        return self.tenant().flushed
+
     # ---- knobs for tests ---------------------------------------------- #
-    def add_traffic(self, out=0, inbound=0):
+    def add_traffic(self, out=0, inbound=0, device_id=None):
+        t = self.tenant(device_id)
         with self.lock:
-            self.counters["xbox_out"] += out
-            self.counters["xbox_in"] += inbound
+            t.counters["out"] += out
+            t.counters["in"] += inbound
 
-    def reset_counters(self):
+    def reset_counters(self, device_id=None):
+        t = self.tenant(device_id)
         with self.lock:
-            self.counters = {"xbox_out": 0, "xbox_in": 0}
+            t.counters = {"out": 0, "in": 0}
 
-    def sections(self, prefix="kidsout_xbox"):
+    def sections(self, prefix=None):
+        prefix = prefix or self.prefix
         with self.lock:
-            return {n: dict(o) for n, o in self.firewall.items() if n.startswith(prefix)}
+            return {n: dict(o) for n, o in self.firewall.items() if owns_section(prefix, n)}
 
     def write_calls(self):
         return [c for c in self.calls if c in (("uci", "set"), ("uci", "add"),
@@ -96,8 +176,9 @@ class MockState:
                                                ("uci", "apply"))]
 
 
-def helper_exec(st, params):
-    """Emulate /usr/libexec/kidsout-xbox. Returns {"code":n,"stdout":..,"stderr":..}."""
+def helper_exec(st, t, params):
+    """Emulate /usr/libexec/kidsout-<id> for tenant `t`.
+    Returns {"code":n,"stdout":..,"stderr":..}."""
     verb = params[0] if params else ""
     args = params[1:]
 
@@ -106,29 +187,30 @@ def helper_exec(st, params):
 
     if verb == "info":
         return {"code": 0, "stderr": "", "stdout": (
-            "firewall=fw4\nnft=yes\n"
+            f"device={t.id}\nfirewall=fw4\nnft=yes\n"
             f"conntrack_tools={'no' if st.fail == 'noconntrack' else 'yes'}\n"
             "proc_nf_conntrack=yes\nct_acct=1\n"
             f"flowtable_counter={'NO' if st.fail == 'nocounterflag' else 'yes'}\n"
             "flowtable_hw=yes\n"
-            f"registered_addrs={' '.join(st.counter_addrs)}\n"
+            f"registered_addrs={' '.join(t.counter_addrs)}\n"
             "openwrt=24.10.0-mock\nipv6_wan=0\n")}
 
     if verb == "counters":
-        # v3 shape: monotonic totals as plain key/value lines. The real helper
+        # Monotonic totals as plain key/value lines. The real helper
         # accumulates per-flow router-side so these never decrease; the
         # 'wentbackwards' failure mode exists to prove the driver copes if the
         # guarantee is ever violated (REVIEW.2 G-04).
-        if st.fail == "nocounters" or not st.counters_installed:
+        if st.fail == "nocounters" or not t.counters_installed:
             return {"code": 4, "stdout": "", "stderr": "no addresses registered"}
         with st.lock:
-            out = int(st.counters.get("xbox_out", 0))
-            inb = int(st.counters.get("xbox_in", 0))
+            out = int(t.counters.get("out", 0))
+            inb = int(t.counters.get("in", 0))
+        ko, ki = (f"{t.id}_out", f"{t.id}_in") if st.legacy_keys else ("out", "in")
         return {"code": 0, "stderr": "",
-                "stdout": f"xbox_out {out}\nxbox_in {inb}\nsource conntrack\n"}
+                "stdout": f"{ko} {out}\n{ki} {inb}\nsource conntrack\n"}
 
     if verb == "counters-install":
-        # v3 takes a list of ADDRESSES (the console can be on either of its two
+        # Takes a list of ADDRESSES (the device may be on any of its
         # interfaces), not a mac/ip pair.
         if not args:
             return {"code": 2, "stdout": "", "stderr": "bad args"}
@@ -136,18 +218,18 @@ def helper_exec(st, params):
             if not re.fullmatch(r"[0-9a-fA-F.:]+", a):
                 return {"code": 2, "stdout": "", "stderr": f"bad address: {a}"}
         new = sorted(set(args))
-        unchanged = st.counters_installed and st.counter_addrs == new
-        st.counters_installed = True
-        st.counter_addrs = new
+        unchanged = t.counters_installed and t.counter_addrs == new
+        t.counters_installed = True
+        t.counter_addrs = new
         if not unchanged:
-            st.reset_counters()
+            st.reset_counters(t.id)
         return {"code": 0, "stderr": "",
                 "stdout": "unchanged\n" if unchanged else "installed\n"}
 
     if verb == "counters-remove":
-        st.counters_installed = False
-        st.counter_addrs = []
-        st.reset_counters()
+        t.counters_installed = False
+        t.counter_addrs = []
+        st.reset_counters(t.id)
         return {"code": 0, "stdout": "removed\n", "stderr": ""}
 
     if verb == "flush":
@@ -155,7 +237,7 @@ def helper_exec(st, params):
             return {"code": 3, "stdout": "", "stderr": "conntrack CLI not installed (opkg install conntrack)"}
         if not args:
             return {"code": 2, "stdout": "", "stderr": "flush needs at least one address"}
-        st.flushed.append(list(args))
+        t.flushed.append(list(args))
         return {"code": 0, "stderr": "",
                 "stdout": f"flushed {2 * len(args)} entries for " + " ".join(args) + "\n"}
 
@@ -188,10 +270,10 @@ def handle_call(st, params):
                 return {"jsonrpc": "2.0", "id": 1,
                         "error": {"code": -32002, "message": "Access denied"}}
             token = "mock" + "0" * 28
-            st.sessions[token] = args.get("username", "kidsout")
+            st.sessions[token] = args.get("username", st.username)
             return ok({"ubus_rpc_session": token,
                        "timeout": args.get("timeout", 300),
-                       "acls": {"access-group": {"kidsout-xbox": ["read", "write"]}},
+                       "acls": {"access-group": {st.acl_group: ["read", "write"]}},
                        "data": {"username": args.get("username")}})
         if method == "list":
             return ok({})
@@ -237,11 +319,11 @@ def handle_call(st, params):
         return status(3)
 
     if obj == "file" and method == "exec":
-        cmd = args.get("command", "")
-        if cmd != HELPER:
-            # the real ACL only permits this one path
+        t = st.tenant_for_path(args.get("command", ""))
+        if t is None:
+            # the real ACL only permits /usr/libexec/kidsout-<id>
             return status(6)
-        return ok(helper_exec(st, args.get("params") or []))
+        return ok(helper_exec(st, t, args.get("params") or []))
 
     return status(4)
 
@@ -307,8 +389,8 @@ def make_cert():
 class MockRouter:
     """A mock router running on a background thread."""
 
-    def __init__(self, port=0, tls=True, quiet=True):
-        self.state = MockState()
+    def __init__(self, port=0, tls=True, quiet=True, device_id="testdev"):
+        self.state = MockState(device_id)
         handler = type("BoundHandler", (Handler,), {"state": self.state, "quiet": quiet})
         # threading, like real rpcd: a single-threaded server would let the
         # `slow` failure mode block every subsequent request in a test run
@@ -327,9 +409,10 @@ class MockRouter:
         return f"{'https' if self.tls else 'http'}://127.0.0.1:{self.port}/ubus"
 
     def config(self, **over):
+        """A config.json for the PRIMARY device. Pass username=... for another."""
         cfg = {"host": "127.0.0.1", "port": self.port, "https": self.tls,
                "allow_http_fallback": False, "verify_tls": False,
-               "username": "kidsout", "password": self.state.password,
+               "username": self.state.username, "password": self.state.password,
                "timeout": 5, "state_timeout": 2, "state_deadline": 7}
         cfg.update(over)
         return cfg
@@ -351,9 +434,11 @@ class MockRouter:
 
 def main():
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8443
-    m = MockRouter(port=port, quiet=False).start()
-    print(f"mock rpcd on {m.url}   (password: {m.state.password})")
-    print("counters start at zero; the console is 'idle' until you feed it traffic.")
+    dev_id = sys.argv[2] if len(sys.argv) > 2 else "testdev"
+    m = MockRouter(port=port, quiet=False, device_id=dev_id).start()
+    print(f"mock rpcd on {m.url}   (device: {dev_id}, username: {m.state.username}, "
+          f"password: {m.state.password})")
+    print("counters start at zero; the device is 'idle' until you feed it traffic.")
     try:
         while True:
             time.sleep(3600)

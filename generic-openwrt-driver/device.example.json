@@ -1,0 +1,35 @@
+{
+  "id": "CHANGE_ME",
+  "display_name": "CHANGE_ME (kidsout device)",
+  "comment": "Set 'id' to this device's directory name under devices/ (lowercase letters and digits only). Everything on the router is derived from it: firewall rule kidsout_<id>_out, helper /usr/libexec/kidsout-<id>, rpcd login kidsout-<id>. Fill 'interfaces' with './driver.sh discover --write' while the device is on; record EVERY interface (wired and wireless) or the block silently fails open whenever the device uses the missing one.",
+  "network": {
+    "zone": "lan",
+    "wan_zone": "wan",
+    "_comment": "The firewall zone the device sits in, and the zone it must not reach. Check with 'uci show firewall | grep name' on the router."
+  },
+  "router": {
+    "primary_host": "192.168.1.1",
+    "alt_hosts": [],
+    "https_port": 443,
+    "http_port": 80,
+    "ubus_path_candidates": [
+      "/ubus"
+    ],
+    "tls_sha256": null,
+    "_comment": "primary_host is the router's LAN address; alt_hosts are tried after it (e.g. a VPN-side address). /ubus is uhttpd-mod-ubus's path; /cgi-bin/luci/rpc/ubus is a different API and does not work. tls_sha256 is written by './driver.sh pin'."
+  },
+  "state": {
+    "threshold_out_bytes_per_min": 204800,
+    "threshold_in_bytes_per_min": 1048576,
+    "max_sample_age_s": 300,
+    "rule_audit_period_s": 900,
+    "_comment": "'up' means that since the previous sample EITHER the device's outbound byte rate exceeded threshold_out_bytes_per_min OR its inbound rate exceeded threshold_in_bytes_per_min (set it to null for outbound-only). The shipped values (200 KB/min out, 1 MB/min in) were calibrated on a game console and are a STARTING POINT ONLY: run './driver.sh calibrate' with the device idle, in active use and streaming, then set both in bytes (see DESIGN.md §5). A sample older than max_sample_age_s is discarded as stale rather than averaged over the gap. Every rule_audit_period_s the driver logs what the router is actually enforcing."
+  },
+  "discover": {
+    "hostname_hints": [
+      "CHANGE_ME"
+    ],
+    "_comment": "Substrings of the device's DHCP hostname, used by 'discover' to find its MAC(s). Defaults to the id when omitted. Case-insensitive."
+  },
+  "interfaces": []
+}

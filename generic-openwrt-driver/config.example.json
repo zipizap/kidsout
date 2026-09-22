@@ -1,0 +1,12 @@
+{
+  "username": null,
+  "password": "CHANGE_ME",
+  "https": true,
+  "allow_http_fallback": true,
+  "verify_tls": false,
+  "timeout": 10,
+  "state_timeout": 1.5,
+  "state_deadline": 4,
+  "session_timeout": 30,
+  "_comment": "Copy to devices/<name>/generic-openwrt-driver_files/config.json, chmod 600, and set the password you chose when running 'router_bootstrap.sh <id>' on the router. 'username' null means the default kidsout-<id>, the login the bootstrap creates; set it only if the router login has another name. Do NOT put the router root password here: the kidsout-<id> rpcd user can only toggle its own firewall rule and run one fixed-verb helper. 'timeout' is per HTTP request for interactive commands; 'state_timeout' and 'state_deadline' bound the getState path, which must finish inside kidsout's 10s limit. verify_tls stays false for a self-signed router certificate — run './driver.sh pin' to record its fingerprint instead, which closes the LAN MITM window without needing a real CA."
+}
