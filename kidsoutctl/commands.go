@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"regexp"
 	"strconv"
+	"strings"
 	"syscall"
 )
 
@@ -172,6 +173,69 @@ func (a *app) cmdEnforce(args []string, on bool) error {
 		return exitError{code: 1}
 	}
 	return nil
+}
+
+// cmdScript runs block.sh/unblock.sh on the given devices (action "block"|"unblock").
+// No kidsout state changes; a non-zero script exit counts as a failure.
+func (a *app) cmdScript(args []string, action string) error {
+	ctx := context.Background()
+	devices, err := a.resolveDevices(ctx, args, action)
+	if err != nil {
+		return err
+	}
+	failed := false
+	results := []*ScriptResult{}
+	for _, d := range devices {
+		r, err := a.c.RunScript(ctx, d, action)
+		if err != nil {
+			fmt.Fprintf(a.err, "%s %s %s: %v\n", a.p.paint(cRed, "error:"), action, d, err)
+			failed = true
+			continue
+		}
+		results = append(results, r)
+		if r.Failed() {
+			failed = true
+		}
+		if a.o.output != "table" {
+			continue
+		}
+		if r.Failed() {
+			detail := fmt.Sprintf("exit %d", r.ExitCode)
+			if r.Error != "" {
+				detail += " (" + r.Error + ")"
+			}
+			fmt.Fprintf(a.err, "%s %s %s: %s\n", a.p.paint(cRed, "error:"), action, d, detail)
+			writeIndented(a.err, r.Stdout)
+			writeIndented(a.err, r.Stderr)
+			continue
+		}
+		fmt.Fprintf(a.out, "%s %s %s %s\n", d, r.Script, a.p.paint(cGreen, "ok"),
+			a.p.paint(cDim, fmt.Sprintf("(%dms)", r.DurationMs)))
+		writeIndented(a.out, r.Stdout)
+	}
+	if a.o.output != "table" {
+		raw, err := json.Marshal(results)
+		if err != nil {
+			return err
+		}
+		if err := renderRaw(a.out, a.o.output, raw); err != nil {
+			return err
+		}
+	}
+	if failed {
+		return exitError{code: 1}
+	}
+	return nil
+}
+
+// writeIndented prints each line of s indented by two spaces (nothing if empty).
+func writeIndented(w io.Writer, s string) {
+	if s == "" {
+		return
+	}
+	for _, line := range strings.Split(s, "\n") {
+		fmt.Fprintf(w, "  %s\n", line)
+	}
 }
 
 func (a *app) cmdTA(args []string) error {

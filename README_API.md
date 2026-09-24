@@ -138,11 +138,45 @@ curl -u "$KOAUTH" -X POST "$KO/api/device/tablet/tf" \
   -d '{"weekday":"sat","tfStart":"10:00","tfEnd":"22:00"}'
 ```
 
+### POST /api/device/{name}/block, /unblock — run a device script now
+
+No body. Runs `devices/<name>/block.sh` (or `unblock.sh`) immediately and returns
+its result. Meant for external programs that want to act on a device directly.
+
+```bash
+curl -u "$KOAUTH" -X POST "$KO/api/device/tv/block"
+curl -u "$KOAUTH" -X POST "$KO/api/device/tv/unblock"
+```
+
+Response — `200` even when the script fails; check `exitCode`:
+
+```json
+{"device":"tv","script":"block.sh","exitCode":0,"stdout":"","stderr":"","durationMs":412}
+```
+
+| Field | Meaning |
+|---|---|
+| `exitCode` | Script exit code; `-1` if it could not run or timed out |
+| `stdout` / `stderr` | Script output, trimmed |
+| `durationMs` | How long the script ran (10s timeout, same as the engine) |
+| `error` | Only present on timeout / exec failure |
+
+**This changes no kidsout state** (status, toggles, time) and sends no SSE event.
+The engine keeps deciding on its own, so it may undo a manual action:
+
+- a manual `unblock` while kidsout says `blocked*` is re-blocked on the next
+  1-minute tick;
+- a manual `block` while the device is allowed stays until kidsout next runs
+  `unblock.sh` (only when a device leaves a `blocked*` status), or until you call
+  `unblock`.
+
+To block through kidsout's own rules instead, use `pause` or adjust `ta`/`tf`.
+
 ## Response codes
 
 | Code | Meaning |
 |---|---|
-| `200` | OK (`/api/state`, `/api/events`) |
+| `200` | OK (`/api/state`, `/api/events`, `/block`, `/unblock` — check `exitCode`) |
 | `204` | Mutation applied |
 | `400` | Unknown device, invalid weekday/toggle/time, or malformed JSON |
 | `401` | Missing/wrong credentials |
@@ -173,6 +207,9 @@ curl -u "$KOAUTH" -X POST "$KO/api/device/tv/enforcement" -d '{"toggle":"enforce
 # Reward: +30 minutes on today's xbox allowance
 today=$(curl -su "$KOAUTH" "$KO/api/state" | grep -o '"today":"[a-z]*"' | cut -d'"' -f4)
 curl -u "$KOAUTH" -X POST "$KO/api/device/xbox/ta" -d "{\"weekday\":\"$today\",\"deltaMinutes\":30}"
+
+# Home Assistant / other program: cut the tv right now, then check the script ran
+curl -su "$KOAUTH" -X POST "$KO/api/device/tv/block" | jq -e '.exitCode == 0'
 
 # Is the xbox currently blocked?
 curl -su "$KOAUTH" "$KO/api/state" | jq -r '.devices.xbox.deviceStatus'

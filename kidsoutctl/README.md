@@ -44,6 +44,8 @@ don't leak into shell history or `ps` output.
 | `unpause <device...> \| --all` | Cancel an active pause (alias: `resume`) |
 | `enforce <device...> \| --all` | Enforcement ON — rules apply again |
 | `unenforce <device...> \| --all` | Enforcement OFF — free use, no time accrual |
+| `block <device...> \| --all` | Run the device's `block.sh` now — no kidsout state change |
+| `unblock <device...> \| --all` | Run the device's `unblock.sh` now — no kidsout state change |
 | `ta <device> <weekday\|today> <±minutes>` | Adjust TimeAllowed (delta) |
 | `tf <device> <weekday\|today> <HH:MM> <HH:MM>` | Set TimeFrame window (when it can be allowed)  |
 | `completion bash` | Bash tab-completion script |
@@ -58,7 +60,7 @@ Weekdays: `sun mon tue wed thu fri sat`, or `today` (resolved server-side).
 |---|---|
 | `-o table\|json\|yaml` | Output format (default `table`; JSON/YAML mirror the API payload) |
 | `--week` | With `get`: weekly schedule instead of today's summary |
-| `--all` | Apply `pause`/`unpause`/`enforce`/`unenforce` to every device |
+| `--all` | Apply `pause`/`unpause`/`enforce`/`unenforce`/`block`/`unblock` to every device |
 | `--once` | With `watch`: exit after the first snapshot |
 | `--server URL` | Override the API base URL |
 | `--color auto\|always\|never` | Color control (`auto` detects TTY; [`NO_COLOR`](https://no-color.org) honored) |
@@ -81,6 +83,9 @@ kidsoutctl unpause tablet               # ok, back
 kidsoutctl unenforce tv                 # weekend treat: free use on the tv
 kidsoutctl enforce tv                   # treat's over
 
+kidsoutctl block tv                     # run tv's block.sh right now
+kidsoutctl unblock --all -o json        # run every unblock.sh, results as a JSON list
+
 kidsoutctl ta xbox today 30             # reward: +30 min right now
 kidsoutctl ta xbox fri -15              # -15 min every Friday
 kidsoutctl tf tablet sat 10:00 22:00    # Saturday window
@@ -95,6 +100,12 @@ kidsoutctl version                      # client and server build identity
 
 `version` never fails: without credentials it prints only the client line, and an
 unreachable server is reported as `server: unavailable (...)` with exit code 0.
+
+`block`/`unblock` are for external programs that want to act on a device
+through kidsoutctl. They only run the script; kidsout's own rules keep
+running, so a manual `unblock` of a device kidsout considers blocked is undone
+on the next 1-minute tick (see the [API docs](../README_API.md)). The command
+exits `1` if any script exits non-zero, and prints its stderr.
 
 ## Exit codes
 

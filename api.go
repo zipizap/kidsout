@@ -266,6 +266,23 @@ func (s *Server) deviceExists(name string) bool {
 	return found
 }
 
+// manualScriptHandler runs a device script on demand (POST .../block, .../unblock)
+// and returns its ScriptResult. It changes no kidsout state: the engine keeps
+// deciding on its own, so it may undo the effect on a later tick.
+func (s *Server) manualScriptHandler(script string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		name := r.PathValue("name")
+		if !s.deviceExists(name) {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		res := s.engine.runScriptDetailed(name, script)
+		log.Printf("api: manual %s/%s exit=%d (%dms)", name, script, res.ExitCode, res.DurationMs)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(res)
+	}
+}
+
 func (s *Server) Routes(mux *http.ServeMux, webFS http.Handler) {
 	mux.Handle("GET /", webFS)
 
@@ -283,6 +300,10 @@ func (s *Server) Routes(mux *http.ServeMux, webFS http.Handler) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(version.Get("kidsout"))
 	})
+
+	// POST /api/device/{name}/block and /unblock  (no body) -> ScriptResult JSON
+	mux.HandleFunc("POST /api/device/{name}/block", s.manualScriptHandler("block.sh"))
+	mux.HandleFunc("POST /api/device/{name}/unblock", s.manualScriptHandler("unblock.sh"))
 
 	// POST /api/device/{name}/ta  {"weekday":"fri","deltaMinutes":10}
 	mux.HandleFunc("POST /api/device/{name}/ta", func(w http.ResponseWriter, r *http.Request) {

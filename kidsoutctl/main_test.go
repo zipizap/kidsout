@@ -46,11 +46,28 @@ func newTestServer(t *testing.T, posts *[]string) *httptest.Server {
 		case r.Method == "POST":
 			body, _ := readAllString(r)
 			*posts = append(*posts, r.URL.Path+" "+body)
+			if res, ok := fakeScriptResult(r.URL.Path); ok {
+				json.NewEncoder(w).Encode(res)
+				return
+			}
 			w.WriteHeader(http.StatusNoContent)
 		default:
 			http.NotFound(w, r)
 		}
 	}))
+}
+
+// fakeScriptResult answers /api/device/{name}/block|unblock; "tv unblock" fails.
+func fakeScriptResult(path string) (ScriptResult, bool) {
+	parts := strings.Split(strings.TrimPrefix(path, "/api/device/"), "/")
+	if len(parts) != 2 || (parts[1] != "block" && parts[1] != "unblock") {
+		return ScriptResult{}, false
+	}
+	res := ScriptResult{Device: parts[0], Script: parts[1] + ".sh", Stdout: "done " + parts[0], DurationMs: 7}
+	if parts[0] == "tv" && parts[1] == "unblock" {
+		res.ExitCode, res.Stdout, res.Stderr = 2, "", "boom"
+	}
+	return res, true
 }
 
 func readAllString(r *http.Request) (string, error) {
@@ -179,6 +196,56 @@ func TestPauseAll(t *testing.T) {
 	code, _, errOut := runCLI(t, srv.URL, "pause", "--all", "xbox")
 	if code != 2 || !strings.Contains(errOut, "not both") {
 		t.Errorf("--all with names: code=%d stderr=%q", code, errOut)
+	}
+}
+
+func TestBlockUnblock(t *testing.T) {
+	var posts []string
+	srv := newTestServer(t, &posts)
+	defer srv.Close()
+
+	code, out, errOut := runCLI(t, srv.URL, "block", "xbox")
+	if code != 0 {
+		t.Fatalf("block exit code = %d, stderr=%q", code, errOut)
+	}
+	if len(posts) != 1 || posts[0] != "/api/device/xbox/block " {
+		t.Errorf("posts = %q", posts)
+	}
+	if !strings.Contains(out, "xbox block.sh ok (7ms)") || !strings.Contains(out, "  done xbox") {
+		t.Errorf("block output = %q", out)
+	}
+
+	// tv's unblock.sh fails in the fake: partial failure -> exit 1, stderr shown
+	posts = nil
+	code, out, errOut = runCLI(t, srv.URL, "unblock", "--all")
+	if code != 1 {
+		t.Fatalf("unblock --all exit code = %d, want 1", code)
+	}
+	if len(posts) != 3 {
+		t.Errorf("expected 3 unblock posts, got %v", posts)
+	}
+	if !strings.Contains(errOut, "unblock tv: exit 2") || !strings.Contains(errOut, "  boom") {
+		t.Errorf("unblock stderr = %q", errOut)
+	}
+	if !strings.Contains(out, "xbox unblock.sh ok") {
+		t.Errorf("unblock stdout = %q", out)
+	}
+
+	code, out, _ = runCLI(t, srv.URL, "block", "xbox", "tv", "-o", "json")
+	if code != 0 {
+		t.Fatalf("block -o json exit code = %d", code)
+	}
+	var results []ScriptResult
+	if err := json.Unmarshal([]byte(out), &results); err != nil || len(results) != 2 {
+		t.Fatalf("block -o json: err=%v results=%v out=%q", err, results, out)
+	}
+	if results[0].Device != "xbox" || results[1].Script != "block.sh" {
+		t.Errorf("block -o json results = %+v", results)
+	}
+
+	code, _, errOut = runCLI(t, srv.URL, "block", "nope")
+	if code != 1 || !strings.Contains(errOut, "unknown device") {
+		t.Errorf("unknown device: code=%d stderr=%q", code, errOut)
 	}
 }
 

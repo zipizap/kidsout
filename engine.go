@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"log"
 	"os/exec"
 	"path/filepath"
@@ -46,6 +49,48 @@ func (e *Engine) runScript(deviceName, script string) (string, error) {
 	cmd := exec.CommandContext(ctx, filepath.Join(e.devicesDir, deviceName, script))
 	out, err := cmd.Output()
 	return strings.TrimSpace(string(out)), err
+}
+
+// ScriptResult is the full outcome of a manually triggered device script.
+type ScriptResult struct {
+	Device     string `json:"device"`
+	Script     string `json:"script"`   // "block.sh" | "unblock.sh"
+	ExitCode   int    `json:"exitCode"` // -1 if it could not run or timed out
+	Stdout     string `json:"stdout"`
+	Stderr     string `json:"stderr"`
+	DurationMs int64  `json:"durationMs"`
+	Error      string `json:"error,omitempty"` // timeout or exec error
+}
+
+// runScriptDetailed executes a device script like runScript, but captures
+// stdout, stderr, exit code and duration separately (used by manual actions).
+func (e *Engine) runScriptDetailed(deviceName, script string) ScriptResult {
+	ctx, cancel := context.WithTimeout(context.Background(), scriptTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, filepath.Join(e.devicesDir, deviceName, script))
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	start := time.Now()
+	err := cmd.Run()
+	res := ScriptResult{
+		Device:     deviceName,
+		Script:     script,
+		Stdout:     strings.TrimSpace(stdout.String()),
+		Stderr:     strings.TrimSpace(stderr.String()),
+		DurationMs: time.Since(start).Milliseconds(),
+	}
+	var exitErr *exec.ExitError
+	switch {
+	case ctx.Err() == context.DeadlineExceeded:
+		res.ExitCode = -1
+		res.Error = fmt.Sprintf("timeout after %s", scriptTimeout)
+	case errors.As(err, &exitErr):
+		res.ExitCode = exitErr.ExitCode()
+	case err != nil:
+		res.ExitCode = -1
+		res.Error = err.Error()
+	}
+	return res
 }
 
 // getState returns "up", "down" or "unknown" (errors/timeouts -> "unknown").

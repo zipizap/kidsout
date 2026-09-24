@@ -33,6 +33,8 @@ Device commands:
   unpause   <device...> | --all    Cancel an active pause (alias: resume)
   enforce   <device...> | --all    Enforcement ON — rules apply again
   unenforce <device...> | --all    Enforcement OFF — free use, no time accrual
+  block     <device...> | --all    Run the device's block.sh now (no state change)
+  unblock   <device...> | --all    Run the device's unblock.sh now (no state change)
   ta <device> <weekday|today> <±minutes>
                                    Adjust recurring time allowance (delta)
   tf <device> <weekday|today> <HH:MM> <HH:MM>
@@ -46,7 +48,7 @@ Other commands:
 Flags:
   -o table|json|yaml    Output format (default: table, colored on TTYs)
   --week                With get: show the full weekly schedule
-  --all                 Apply pause/unpause/enforce/unenforce to every device
+  --all                 Apply pause/unpause/enforce/unenforce/block/unblock to every device
   --once                With watch: exit after the first snapshot
   --server URL          API base URL (default: $KIDSOUT_SERVER, $KO, or ` + defaultServer + `)
   --color auto|always|never
@@ -68,6 +70,7 @@ Examples:
   kidsoutctl get xbox -o yaml
   kidsoutctl get --week
   kidsoutctl pause --all
+  kidsoutctl block xbox
   kidsoutctl ta xbox today 30
   kidsoutctl ta xbox fri -15
   kidsoutctl tf tablet sat 10:00 22:00
@@ -80,7 +83,7 @@ _kidsoutctl() {
     local cur prev cmds
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    cmds="get state watch pause unpause resume enforce unenforce ta tf completion version help"
+    cmds="get state watch pause unpause resume enforce unenforce block unblock ta tf completion version help"
     case "$prev" in
         -o) COMPREPLY=($(compgen -W "table json yaml" -- "$cur")); return ;;
         --color) COMPREPLY=($(compgen -W "auto always never" -- "$cur")); return ;;
@@ -277,6 +280,10 @@ func run(argv []string, stdout, stderr io.Writer) int {
 		cmdErr = a.cmdEnforce(args, true)
 	case "unenforce":
 		cmdErr = a.cmdEnforce(args, false)
+	case "block":
+		cmdErr = a.cmdScript(args, "block")
+	case "unblock":
+		cmdErr = a.cmdScript(args, "unblock")
 	case "ta":
 		cmdErr = a.cmdTA(args)
 	case "tf":

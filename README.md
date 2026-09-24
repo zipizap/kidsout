@@ -25,7 +25,7 @@ free-use-mode.
   the window, paused, …).
 - **Live status** — the page updates in real time via Server-Sent Events; a device shows
   as `inUse`, `notInUse`, or one of the `blocked*` states.
-- **Quick overrides** — a 20-minute **pause** (dinner time), or **free-use-mode**
+- **Quick overrides** — a 20-minute **pause** (ex: take a break), or **free-use-mode**
   that never blocks (and does not count against the use-time).
 - **Survives restarts** — all runtime state is persisted to `runtimestore.yaml`.
 
@@ -360,6 +360,8 @@ Additionally, for remote configuration:
 - see **[kidsoutctl](kidsoutctl/README.md)**, a kubectl-style
 command-line client for Kidsout: view device status as colored tables (or JSON/YAML),
 watch live updates, pause/enforce devices, and adjust time limits from the shell.
+It can also run a device's `block.sh`/`unblock.sh` on demand (`kidsoutctl block tv`),
+so other programs can act on devices through it.
 
 - see the [HTTP API reference](README_API.md)
 

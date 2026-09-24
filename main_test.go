@@ -437,3 +437,72 @@ func TestVersionFlagAndEndpoint(t *testing.T) {
 		t.Errorf("unexpected /api/version payload: %+v", info)
 	}
 }
+
+// TestManualBlockUnblock verifies POST /api/device/{name}/block|unblock run the
+// raw scripts, report stdout/stderr/exit code, and leave kidsout state untouched.
+func TestManualBlockUnblock(t *testing.T) {
+	devicesDir := t.TempDir()
+	dir := filepath.Join(devicesDir, "dev1")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	scripts := map[string]string{
+		"getState.sh": "#!/bin/sh\necho up\n",
+		"block.sh":    "#!/bin/sh\necho blocked-ok\n",
+		"unblock.sh":  "#!/bin/sh\necho oops >&2\nexit 3\n",
+	}
+	for name, body := range scripts {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	store, err := LoadStateStore(filepath.Join(t.TempDir(), "rs.yaml"), []string{"dev1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &Server{store: store, hub: NewSSEHub()}
+	srv.engine = NewEngine(devicesDir, store, srv.broadcastState)
+	mux := http.NewServeMux()
+	srv.Routes(mux, http.NotFoundHandler())
+
+	var before DeviceState
+	store.Read(func(st *Store) { before = *st.Devices["dev1"] })
+
+	post := func(path string) (int, ScriptResult) {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest("POST", path, nil))
+		var res ScriptResult
+		if rec.Code == http.StatusOK {
+			if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+				t.Fatalf("%s: decoding %q: %v", path, rec.Body.String(), err)
+			}
+		}
+		return rec.Code, res
+	}
+
+	code, res := post("/api/device/dev1/block")
+	if code != http.StatusOK || res.ExitCode != 0 || res.Stdout != "blocked-ok" ||
+		res.Script != "block.sh" || res.Device != "dev1" || res.Error != "" {
+		t.Errorf("block: code=%d res=%+v", code, res)
+	}
+
+	code, res = post("/api/device/dev1/unblock")
+	if code != http.StatusOK || res.ExitCode != 3 || res.Stderr != "oops" || res.Script != "unblock.sh" {
+		t.Errorf("unblock: code=%d res=%+v", code, res)
+	}
+
+	if code, _ := post("/api/device/nope/block"); code != http.StatusBadRequest {
+		t.Errorf("unknown device: got %d, want 400", code)
+	}
+
+	store.Read(func(st *Store) {
+		after := st.Devices["dev1"]
+		if after.DeviceStatus != before.DeviceStatus ||
+			after.EnforcementToggle != before.EnforcementToggle ||
+			after.PauseToggle != before.PauseToggle {
+			t.Errorf("state changed: before=%+v after=%+v", before, *after)
+		}
+	})
+}

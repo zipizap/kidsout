@@ -14,6 +14,12 @@ Categories: `Added`, `Changed`, `Fixed`, `Removed`, `Security`, `Docs`.
 ## [Unreleased]
 
 ### Added
+- Manual device actions: `POST /api/device/{name}/block` and `/unblock` run the
+  device's `block.sh`/`unblock.sh` right away and return the result as JSON
+  (`exitCode`, `stdout`, `stderr`, `durationMs`). No kidsout state changes, so
+  the engine may undo the effect on a later tick. `kidsoutctl block|unblock
+  <device...> | --all` wraps them for external programs (exit 1 if a script
+  fails; `-o json|yaml` prints the results as a list).
 - **`generic-openwrt-driver/`**: the Xbox OpenWrt driver generalised into one
   shared driver for any device behind an OpenWrt router. Each device keeps only
   its own facts under `devices/<name>/generic-openwrt-driver_files/`

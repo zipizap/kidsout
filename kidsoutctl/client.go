@@ -38,6 +38,20 @@ type Day struct {
 	TFEnd     string `json:"tfEnd" yaml:"tfEnd"`
 }
 
+// ScriptResult mirrors the /api/device/{name}/block|unblock response.
+type ScriptResult struct {
+	Device     string `json:"device" yaml:"device"`
+	Script     string `json:"script" yaml:"script"`
+	ExitCode   int    `json:"exitCode" yaml:"exitCode"`
+	Stdout     string `json:"stdout" yaml:"stdout"`
+	Stderr     string `json:"stderr" yaml:"stderr"`
+	DurationMs int64  `json:"durationMs" yaml:"durationMs"`
+	Error      string `json:"error,omitempty" yaml:"error,omitempty"`
+}
+
+// Failed reports whether the script did not exit 0.
+func (r *ScriptResult) Failed() bool { return r.ExitCode != 0 || r.Error != "" }
+
 // DeviceNames returns the device keys sorted alphabetically.
 func (s *State) DeviceNames() []string {
 	names := make([]string, 0, len(s.Devices))
@@ -230,6 +244,19 @@ func (c *Client) SetTF(ctx context.Context, device, weekday, start, end string) 
 	_, err := c.do(ctx, http.MethodPost, "/api/device/"+device+"/tf",
 		map[string]string{"weekday": weekday, "tfStart": start, "tfEnd": end})
 	return err
+}
+
+// RunScript runs the device's block.sh/unblock.sh on the server (action "block"|"unblock").
+func (c *Client) RunScript(ctx context.Context, device, action string) (*ScriptResult, error) {
+	raw, err := c.do(ctx, http.MethodPost, "/api/device/"+device+"/"+action, nil)
+	if err != nil {
+		return nil, err
+	}
+	var r ScriptResult
+	if err := json.Unmarshal(raw, &r); err != nil {
+		return nil, fmt.Errorf("decoding %s response: %w", action, err)
+	}
+	return &r, nil
 }
 
 // Watch subscribes to /api/events and invokes fn for every SSE data payload.
